@@ -33,12 +33,33 @@ _FILE_PATTERN = 'plants_%s_*.tfrecord'
 
 SPLITS_TO_SIZES = {'train': 62, 'validation': 10}
 
-_NUM_CLASSES = 5
-
 _ITEMS_TO_DESCRIPTIONS = {
     'image': 'A [32 x 32 x 3] color image.',
     'label': 'A single integer between 0 and 9',
 }
+
+
+def read_label_file(dataset_dir, filename=dataset_utils.LABELS_FILENAME):
+    """Reads the labels file and returns a mapping from ID to class name.
+
+    Args:
+      dataset_dir: The directory in which the labels file is found.
+      filename: The filename where the class names are written.
+
+    Returns:
+      A map from a label (integer) to class name.
+    """
+    labels_filename = os.path.join(dataset_dir, filename)
+    with tf.gfile.Open(labels_filename, 'rb') as f:
+        lines = f.read().decode('utf-8')
+    lines = lines.split('\n')
+    lines = filter(None, lines)
+
+    labels_to_class_names = {}
+    for line in lines:
+        index = line.index(':')
+        labels_to_class_names[int(line[:index])] = line[index + 1:]
+    return labels_to_class_names
 
 
 def get_split(split_name, dataset_dir, file_pattern=None, reader=None):
@@ -86,7 +107,7 @@ def get_split(split_name, dataset_dir, file_pattern=None, reader=None):
 
     labels_to_names = None
     if dataset_utils.has_labels(dataset_dir):
-        labels_to_names = dataset_utils.read_label_file(dataset_dir)
+        labels_to_names = read_label_file(dataset_dir)
 
     return slim.dataset.Dataset(
         data_sources=file_pattern,
@@ -94,6 +115,5 @@ def get_split(split_name, dataset_dir, file_pattern=None, reader=None):
         decoder=decoder,
         num_samples=SPLITS_TO_SIZES[split_name],
         items_to_descriptions=_ITEMS_TO_DESCRIPTIONS,
-        num_classes=_NUM_CLASSES,
+        num_classes=len(labels_to_names),
         labels_to_names=labels_to_names)
-

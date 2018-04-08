@@ -27,10 +27,13 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import csv
+
 import math
 import os
 import random
 import sys
+import io
 
 import tensorflow as tf
 
@@ -48,7 +51,7 @@ _DATA_URL = 'http://download.tensorflow.org/example_images/flower_photos.tgz'
 
 # The number of images in the validation set.
 # _NUM_VALIDATION = 350
-_RADIO_VALIDATION = 1/6
+_RADIO_VALIDATION = 1 / 6
 
 # Seed for repeatability.
 _RANDOM_SEED = 0
@@ -108,6 +111,19 @@ def _get_file_info(fpath):
     return res
 
 
+def _get_jpgs(dir_path):
+    return [
+        os.path.join(dir_path, filename)
+        for filename in os.listdir(dir_path)
+        if filename.lower().endswith('.jpg')
+    ]
+
+
+def _utf_8_encoder(unicode_csv_data):
+    for line in unicode_csv_data:
+        yield line.encode('utf-8')
+
+
 def _get_filenames_and_classes(dataset_dir):
     """Returns a list of filenames and inferred class names.
 
@@ -120,19 +136,20 @@ def _get_filenames_and_classes(dataset_dir):
       subdirectories, representing class names.
     """
     # flower_root = os.path.join(dataset_dir, 'flower_photos')
-    flower_root = dataset_dir
+    csv_path = os.path.join(dataset_dir, 'result.csv')
+
     directories = []
     class_names = []
     filename_class_tuples = []
-    for filename in os.listdir(flower_root):
-        if not filename.lower().endswith('.jpg'):
-            continue
-
-        path = os.path.join(flower_root, filename)
-        file_info = _get_file_info(path)
-        class_name = file_info['label']
-        class_names.append(class_name)
-        filename_class_tuples.append((path, class_name))
+    with io.open(csv_path, encoding='utf8') as csvfile:
+        reader = csv.reader(_utf_8_encoder(csvfile), delimiter=',')
+        for class_folder, class_name in reader:
+            class_name = class_name.decode('utf8')
+            class_folder_path = os.path.join(dataset_dir, class_folder)
+            jpg_files = _get_jpgs(class_folder_path)
+            for file_path in jpg_files:
+                class_names.append(class_name)
+                filename_class_tuples.append((file_path, class_name))
 
     class_names = list(set(class_names))
     return filename_class_tuples, sorted(class_names)
