@@ -22,6 +22,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import json
+
 import os
 import tensorflow as tf
 
@@ -29,9 +31,9 @@ from datasets import dataset_utils
 
 slim = tf.contrib.slim
 
-_FILE_PATTERN = 'plants_%s_*.tfrecord'
+DATASET_INFO_FILENAME = 'dataset_info.json'
 
-SPLITS_TO_SIZES = {'train': 62, 'validation': 10}
+_FILE_PATTERN = 'plants_%s_*.tfrecord'
 
 _ITEMS_TO_DESCRIPTIONS = {
     'image': 'A [32 x 32 x 3] color image.',
@@ -62,6 +64,13 @@ def read_label_file(dataset_dir, filename=dataset_utils.LABELS_FILENAME):
     return labels_to_class_names
 
 
+def _read_dataset_info_file(dataset_dir,
+                            filename=DATASET_INFO_FILENAME):
+    labels_filename = os.path.join(dataset_dir, filename)
+    with tf.gfile.Open(labels_filename, 'r') as f:
+        return json.load(f)
+
+
 def get_split(split_name, dataset_dir, file_pattern=None, reader=None):
     """Gets a dataset tuple with instructions for reading flowers.
 
@@ -79,7 +88,13 @@ def get_split(split_name, dataset_dir, file_pattern=None, reader=None):
     Raises:
       ValueError: if `split_name` is not a valid train/validation split.
     """
-    if split_name not in SPLITS_TO_SIZES:
+    dataset_info = _read_dataset_info_file(dataset_dir)
+    splits_to_sizes = {
+        'train': dataset_info['train'],
+        'validation': dataset_info['validation']
+    }
+
+    if split_name not in splits_to_sizes:
         raise ValueError('split name %s was not recognized.' % split_name)
 
     if not file_pattern:
@@ -113,7 +128,7 @@ def get_split(split_name, dataset_dir, file_pattern=None, reader=None):
         data_sources=file_pattern,
         reader=reader,
         decoder=decoder,
-        num_samples=SPLITS_TO_SIZES[split_name],
+        num_samples=splits_to_sizes[split_name],
         items_to_descriptions=_ITEMS_TO_DESCRIPTIONS,
         num_classes=len(labels_to_names),
         labels_to_names=labels_to_names)

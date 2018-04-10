@@ -27,6 +27,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import json
+
 import csv
 
 import math
@@ -38,6 +40,7 @@ import io
 import tensorflow as tf
 
 from datasets import dataset_utils
+from datasets import plants
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -51,7 +54,7 @@ _DATA_URL = 'http://download.tensorflow.org/example_images/flower_photos.tgz'
 
 # The number of images in the validation set.
 # _NUM_VALIDATION = 350
-_RADIO_VALIDATION = 1 / 6
+_RADIO_VALIDATION = 1.0 / 6
 
 # Seed for repeatability.
 _RANDOM_SEED = 0
@@ -239,6 +242,13 @@ def _dataset_exists(dataset_dir):
     return True
 
 
+def _write_dataset_info_file(dataset_info, dataset_dir,
+                             filename=plants.DATASET_INFO_FILENAME):
+    labels_filename = os.path.join(dataset_dir, filename)
+    with tf.gfile.Open(labels_filename, 'w') as f:
+        json.dump(dataset_info, f)
+
+
 def run(dataset_dir):
     """Runs the download and conversion operation.
 
@@ -272,6 +282,10 @@ def run(dataset_dir):
     # Finally, write the labels file:
     labels_to_class_names = dict(zip(range(len(class_names)), class_names))
     dataset_utils.write_label_file(labels_to_class_names, dataset_dir)
+    _write_dataset_info_file({
+        'train': len(photo_filenames) - num_validation,
+        'validation': num_validation,
+    }, dataset_dir)
 
     # _clean_up_temporary_files(dataset_dir)
     print('\nFinished converting the Plant dataset!')
