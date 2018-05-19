@@ -56,7 +56,7 @@ tf.app.flags.DEFINE_string(
 CHECKPONT_PATH = '/tmp/tfmodel/'
 # CHECKPONT_PATH = 'resnet_v2_50_plants_non_exif'
 CHECKPONT_PATH = 'resnet_v2_50_plants_0426'
-MODEL_DIR = CHECKPONT_PATH
+MODEL_DIR = os.environ.get('MODEL_DIR') or CHECKPONT_PATH
 tf.app.flags.DEFINE_string(
     'checkpoint_path', CHECKPONT_PATH,
     'The directory where the model was written to or an absolute path to a '
@@ -281,25 +281,19 @@ def pre_process(im, shift=True):
 
 def _inference_by_pb():
     # http://www.cnblogs.com/arkenstone/p/7551270.html
-    labels_to_names = read_label_file(FLAGS.dataset_dir)
     filenames = [
         ('20180330/1lZsRrQzj/1lZsRrQzj_5.jpg', u'通泉草'),
         ('20180330/4PdXwYcGt/4PdXwYcGt_5.jpg', u'酢漿草'),
     ]
     for filename, label in filenames:
         filename = os.path.join(DATASET_DIR, filename)
-        image_np = PIL.Image.open(filename)
-        logits = run_inference_by_pb(image_np)
-
-        print('logits', logits)
-        index = np.argmax(logits, 1)
+        # image_np = cv2.imread(filename)
+        result = run_inference_on_file(filename)
+        index = result['prediction_label']
         print("Prediction label index:", index)
-        prediction_name = labels_to_names[index[0]]
+        prediction_name = result['prediction_name']
         print("Prediction name:", prediction_name)
-        index_list = np.argsort(logits, 1)
-        print("Top 3 Prediction label index:",
-              index_list[0],
-              ' '.join([labels_to_names[i] for i in list(index_list[0])]))
+        print("Top 3 Prediction label index:", ' '.join(result['top_n_names']))
         assert prediction_name == label
 
 
@@ -382,6 +376,29 @@ def run_inference_by_coreml(image_np):
     coreml_output = coreml_model.predict(coreml_inputs, useCPUOnly=False)
     probs = coreml_output['resnet_v2_50__predictions__Reshape_1__0'].flatten()
     return probs
+
+
+def run_inference_on_file_pb(filename):
+    labels_to_names = read_label_file(FLAGS.dataset_dir)
+    image_np = PIL.Image.open(filename)
+    logits = run_inference_by_pb(image_np)
+    index = np.argmax(logits, 1)
+    prediction_name = labels_to_names[index[0]]
+    index_list = np.argsort(logits, 1)
+    top_n_names = list(reversed(
+        [labels_to_names[i] for i in list(index_list[0])]))
+    print('logits', logits)
+    result = {
+        'prediction_name': prediction_name,
+        'prediction_label': index[0],
+        'top_n_names': top_n_names,
+        'logits': logits.tolist(),
+    }
+    return result
+
+
+def run_inference_on_file(filename):
+    return run_inference_on_file_pb(filename)
 
 
 def main(_):
