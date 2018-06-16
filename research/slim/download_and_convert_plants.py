@@ -1,3 +1,4 @@
+# -*- coding: UTF-8 -*-
 # Copyright 2016 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,11 +37,14 @@ import os
 import random
 import sys
 import io
+from collections import defaultdict
 
 import tensorflow as tf
 
 from datasets import dataset_utils
 from datasets import plants
+
+SPLIT_NAME_TRAIN = 'train'
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -174,7 +178,7 @@ def _convert_dataset(split_name, filenames, class_names_to_ids, dataset_dir):
         (integers).
       dataset_dir: The directory where the converted datasets are stored.
     """
-    assert split_name in ['train', 'validation']
+    assert split_name in [SPLIT_NAME_TRAIN, 'validation']
 
     num_per_shard = int(math.ceil(len(filenames) / float(_NUM_SHARDS)))
 
@@ -233,7 +237,7 @@ def _clean_up_temporary_files(dataset_dir):
 
 
 def _dataset_exists(dataset_dir):
-    for split_name in ['train', 'validation']:
+    for split_name in [SPLIT_NAME_TRAIN, 'validation']:
         for shard_id in range(_NUM_SHARDS):
             output_filename = _get_dataset_filename(
                 dataset_dir, split_name, shard_id)
@@ -267,14 +271,12 @@ def run(dataset_dir):
     class_names_to_ids = dict(zip(class_names, range(len(class_names))))
 
     # Divide into train and test:
-    random.seed(_RANDOM_SEED)
-    random.shuffle(photo_filenames)
-    num_validation = int(_RADIO_VALIDATION * len(photo_filenames))
-    training_filenames = photo_filenames[num_validation:]
-    validation_filenames = photo_filenames[:num_validation]
+    training_filenames, validation_filenames = split_dataset_by_directory(
+        photo_filenames)
+    num_validation = len(validation_filenames)
 
     # First, convert the training and validation sets.
-    _convert_dataset('train', training_filenames, class_names_to_ids,
+    _convert_dataset(SPLIT_NAME_TRAIN, training_filenames, class_names_to_ids,
                      dataset_dir)
     _convert_dataset('validation', validation_filenames, class_names_to_ids,
                      dataset_dir)
@@ -283,12 +285,56 @@ def run(dataset_dir):
     labels_to_class_names = dict(zip(range(len(class_names)), class_names))
     dataset_utils.write_label_file(labels_to_class_names, dataset_dir)
     _write_dataset_info_file({
-        'train': len(photo_filenames) - num_validation,
+        SPLIT_NAME_TRAIN: len(photo_filenames) - num_validation,
         'validation': num_validation,
     }, dataset_dir)
 
     # _clean_up_temporary_files(dataset_dir)
     print('\nFinished converting the Plant dataset!')
+
+
+def split_dataset(photo_filenames):
+    random.seed(_RANDOM_SEED)
+    random.shuffle(photo_filenames)
+    # 就算樣本數太少也至少要有1個validation樣本
+    num_validation = int(_RADIO_VALIDATION * len(photo_filenames)) or 1
+    training_filenames = photo_filenames[num_validation:]
+    validation_filenames = photo_filenames[:num_validation]
+    return training_filenames, validation_filenames
+
+
+def _groupby_unsorted(items, key=lambda x: x):
+    d = defaultdict(list)
+    for item in items:
+        d[key(item)].append(item)
+    return d.items()
+
+
+def split_dataset_by_directory(photo_filenames):
+    # rulu: 不是很有效率，但為了邏輯分離，所以在列出檔名後才又依其所在資料夾shuffle
+
+    def _get_class(tuple):
+        return tuple[1]
+
+    training_filenames = []
+    validation_filenames = []
+
+    for class_name, tuples in _groupby_unsorted(photo_filenames,
+                                                key=_get_class):
+        dir_files_map = {
+            dir_: files for dir_, files in
+            _groupby_unsorted(tuples, lambda pair: os.path.dirname(pair[0]))
+        }
+        directories = dir_files_map.keys()
+        _training_dirs, _validation_dirs = split_dataset(list(directories))
+
+        for dir_ in _training_dirs:
+            training_filenames.extend(dir_files_map[dir_])
+
+        for dir_ in _validation_dirs:
+            validation_filenames.extend(dir_files_map[dir_])
+
+    return training_filenames, validation_filenames
 
 
 def main(_):
