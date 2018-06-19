@@ -3,6 +3,7 @@ from os.path import isfile, join
 import time
 
 import os
+import re
 from select import select
 
 import threading
@@ -125,7 +126,9 @@ def mkdir_p(path):
 
 def get_step(checkpoint_path):
     file_path = tf.train.latest_checkpoint(checkpoint_path)
-    import re
+    if not file_path:
+        return 0
+
     return int(re.search('-(\d+)$', file_path).group(1))
 
 
@@ -204,20 +207,26 @@ def main(config_file):
     pretrained_checkpoint_path = config['pretrained_checkpoint_path']
     checkpoint_path = config['checkpoint_path']
     dataset_dir = config['dataset_dir']
+    model_name = config['model_name']
+    eval_every_n_step = int(config.get('eval_every_n_step', 50))
 
+    trainable_scopes = {
+        'resnet_v2_50': 'resnet_v2_50/logits',
+        'mobilenet_v1': 'MobilenetV1/Logits',
+    }[model_name]
     train_script_params = {
         'train_dir': checkpoint_path,
         'dataset_name': 'plants',
         'dataset_split_name': 'train',
         'dataset_dir': dataset_dir,
-        'model_name': 'resnet_v2_50',
+        'model_name': model_name,
         'clone_on_cpu': True,
         'checkpoint_path': pretrained_checkpoint_path,
-        'checkpoint_exclude_scopes': 'resnet_v2_50/logits',
+        'checkpoint_exclude_scopes': trainable_scopes,
         'save_summaries_secs': '120',
         'save_interval_secs': '120',
         'num_preprocessing_threads': '4',
-        'trainable_scopes': 'resnet_v2_50/logits',
+        'trainable_scopes': trainable_scopes,
     }
 
     train_script_args = [
@@ -231,7 +240,7 @@ def main(config_file):
         'dataset_dir': dataset_dir,
         'dataset_name': 'plants',
         'dataset_split_name': 'validation',
-        'model_name': 'resnet_v2_50',
+        'model_name': model_name,
     }
 
     eval_script_args = [
@@ -249,7 +258,6 @@ def main(config_file):
     # eval_thread.start()
 
     print('started')
-    eval_every_n_step = 50
     while True:
         step = get_step(checkpoint_path)
         _train_params = train_script_params.copy()
@@ -258,11 +266,16 @@ def main(config_file):
             train_script_args + dict_to_command_args(_train_params))
 
         eval_thread.eval()
+        step = get_step(checkpoint_path)
+        summary = eval_thread.read_summary()
+        summary['step'] = step
+        with open('tmp_{}.log'.format(model_name), 'a+') as f:
+            f.write('{}\n'.format(summary))
 
-        # raise
-        # eval_thread.join()
-        # train_thread.terminate()
-        # train_thread.join()
+            # raise
+            # eval_thread.join()
+            # train_thread.terminate()
+            # train_thread.join()
 
 
 if __name__ == '__main__':
