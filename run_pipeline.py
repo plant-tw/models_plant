@@ -9,9 +9,10 @@ import threading
 
 import sys
 
+import tensorflow as tf
+
 
 def read_eval_summary(path_to_events_file):
-    import tensorflow as tf
     last_summary = {}
     print(path_to_events_file)
     for e in reversed(list(tf.train.summary_iterator(path_to_events_file))):
@@ -43,8 +44,7 @@ def read_eval_summary(path_to_events_file):
 
 
 def get_last_file(directory):
-    last_file = [f for f in os.listdir(directory)
-                 if isfile(join(directory, f))][-1]
+    last_file = list(sorted([f for f in os.listdir(directory)]))[-1]
     return join(directory, last_file)
 
 
@@ -111,20 +111,51 @@ class TrainThread(RunCommandThread):
         pass
 
 
+def mkdir_p(path):
+    try:
+        os.makedirs(path)
+    except OSError as exc:  # Python >2.5
+        if exc.errno == errno.EEXIST and os.path.isdir(path):
+            pass
+        else:
+            raise
+
+
+def get_step(checkpoint_path):
+    file_path = tf.train.latest_checkpoint(checkpoint_path)
+    import re
+    return int(re.search('-(\d+)$', file_path).group(1))
+
+
 class EvalThread(RunCommandThread):
-    def __init__(self, command_args):
+    def __init__(self, command_args, checkpoint_path):
         target = self.run_loop
         super(EvalThread, self).__init__(target)
         self.name = 'E'
         self.command_args = command_args
+        self.checkpoint_path = checkpoint_path
+
+    def get_eval_events_dir(self):
+        return '{}/eval_events'.format(self.checkpoint_path)
 
     def eval(self):
         call_args = self.command_args
+        call_args = [a for a in call_args if
+                     not a.startswith('--checkpoint_path=')]
         # ret = subprocess.call(call_args, shell=True)
+        file_path = tf.train.latest_checkpoint(self.checkpoint_path)
+        step = get_step(self.checkpoint_path)
+        eval_dir = '{}/{}_{}'.format(self.get_eval_events_dir(),
+                                     int(time.time()), step)
+        mkdir_p(eval_dir)
+        call_args.append('--checkpoint_path=' + file_path)
+        call_args.append('--eval_dir={}'.format(eval_dir))
+
         self.run_command(call_args)
 
     def read_summary(self):
-        last_event_file = get_last_file('/tmp/tfmodel')
+        last_event_dir = get_last_file(self.get_eval_events_dir())
+        last_event_file = get_last_file(last_event_dir)
         return read_eval_summary(last_event_file)
 
     def run_loop(self):
@@ -153,53 +184,77 @@ class EvalThread(RunCommandThread):
             time.sleep(3 * 60)
 
 
+def dict_to_command_args(d):
+    return [
+        '--{}={}'.format(k, v) if v is not True else '--{}'.format(k)
+        for k, v in d.items()
+    ]
+
+
 def main():
     # run_command(['sleep', '10'])
     pretrained_checkpoint_path = 'resnet_v2_50_2017_04_14/resnet_v2_50.ckpt'
     checkpoint_path = 'resnet_v2_50_plants_0617'
     dataset_dir = '/projects/private/plant/data_non_exif'
 
+    train_script_params = {
+        'train_dir': checkpoint_path,
+        'dataset_name': 'plants',
+        'dataset_split_name': 'train',
+        'dataset_dir': dataset_dir,
+        'model_name': 'resnet_v2_50',
+        'clone_on_cpu': True,
+        'checkpoint_path': pretrained_checkpoint_path,
+        'checkpoint_exclude_scopes': 'resnet_v2_50/logits',
+        'save_summaries_secs': '120',
+        'save_interval_secs': '120',
+        'num_preprocessing_threads': '4',
+        'trainable_scopes': 'resnet_v2_50/logits',
+    }
+
     train_script_args = [
         sys.executable,
         'research/slim/train_image_classifier.py',
-        '--train_dir=' + checkpoint_path,
-        '--dataset_name=plants',
-        '--dataset_split_name=train',
-        '--dataset_dir=' + dataset_dir,
-        '--model_name=resnet_v2_50',
-        '--clone_on_cpu',
-        '--checkpoint_path=' + pretrained_checkpoint_path,
-        '--checkpoint_exclude_scopes=resnet_v2_50/logits',
-        '--save_summaries_secs=120',
-        '--save_interval_secs=120',
-        '--num_preprocessing_threads=4',
-        '--trainable_scopes=resnet_v2_50/logits',
     ]
+
+    eval_script_params = {
+        'alsologtostderr': True,
+        'checkpoint_path': checkpoint_path,
+        'dataset_dir': dataset_dir,
+        'dataset_name': 'plants',
+        'dataset_split_name': 'validation',
+        'model_name': 'resnet_v2_50',
+    }
 
     eval_script_args = [
-        sys.executable,
-        'research/slim/eval_image_classifier.py',
-        '--alsologtostderr',
-        '--checkpoint_path=' + checkpoint_path,
-        '--dataset_dir=' + dataset_dir,
-        '--dataset_name=plants',
-        '--dataset_split_name=validation',
-        '--model_name=resnet_v2_50',
-    ]
-
+                           sys.executable,
+                           'research/slim/eval_image_classifier.py',
+                       ] + dict_to_command_args(eval_script_params)
     train_thread = TrainThread(train_script_args)
-    train_thread.start()
-    # raise
+    # train_thread.start()
+
 
     # No need to start evaluation so early
-    time.sleep(60)
+    # time.sleep(60)
     # eval_script_args = ['which', 'python']
-    eval_thread = EvalThread(command_args=eval_script_args)
-    eval_thread.start()
+    eval_thread = EvalThread(eval_script_args, checkpoint_path)
+    # eval_thread.start()
+
     print('started')
-    eval_thread.join()
-    train_thread.terminate()
-    train_thread.join()
+    eval_every_n_step = 50
+    while True:
+        step = get_step(checkpoint_path)
+        _train_params = train_script_params.copy()
+        _train_params.update(max_number_of_steps=step + eval_every_n_step)
+        train_thread.run_command(
+            train_script_args + dict_to_command_args(_train_params))
+
+        eval_thread.eval()
+
+        # raise
+        # eval_thread.join()
+        # train_thread.terminate()
+        # train_thread.join()
 
 
 main()
