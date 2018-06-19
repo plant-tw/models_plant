@@ -9,7 +9,9 @@ import threading
 
 import sys
 
+import click
 import tensorflow as tf
+import yaml
 
 
 def read_eval_summary(path_to_events_file):
@@ -191,11 +193,17 @@ def dict_to_command_args(d):
     ]
 
 
-def main():
-    # run_command(['sleep', '10'])
-    pretrained_checkpoint_path = 'resnet_v2_50_2017_04_14/resnet_v2_50.ckpt'
-    checkpoint_path = 'resnet_v2_50_plants_0617'
-    dataset_dir = '/projects/private/plant/data_non_exif'
+@click.command()
+@click.argument('config_file')
+def main(config_file):
+    with open(config_file) as f:
+        config = yaml.load(f)
+
+    print('config: {}'.format(config))
+
+    pretrained_checkpoint_path = config['pretrained_checkpoint_path']
+    checkpoint_path = config['checkpoint_path']
+    dataset_dir = config['dataset_dir']
 
     train_script_params = {
         'train_dir': checkpoint_path,
@@ -257,4 +265,5 @@ def main():
         # train_thread.join()
 
 
-main()
+if __name__ == '__main__':
+    main()
