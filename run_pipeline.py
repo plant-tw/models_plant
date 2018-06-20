@@ -14,6 +14,9 @@ import click
 import tensorflow as tf
 import yaml
 
+TRAINING_SET_NAME = 'train'
+VALIDATION_SET_NAME = 'validation'
+
 
 def read_eval_summary(path_to_events_file):
     last_summary = {}
@@ -46,8 +49,10 @@ def read_eval_summary(path_to_events_file):
         # break
 
 
-def get_last_file(directory):
-    last_file = list(sorted([f for f in os.listdir(directory)]))[-1]
+def get_last_file(directory, name_filter=None):
+    last_file = list(sorted([
+        f for f in filter(name_filter, os.listdir(directory))
+    ]))[-1]
     return join(directory, last_file)
 
 
@@ -143,23 +148,29 @@ class EvalThread(RunCommandThread):
     def get_eval_events_dir(self):
         return '{}/eval_events'.format(self.checkpoint_path)
 
-    def eval(self):
-        call_args = self.command_args
-        call_args = [a for a in call_args if
-                     not a.startswith('--checkpoint_path=')]
+    def eval(self, script_params, split_name=VALIDATION_SET_NAME):
+        script_params = script_params.copy()
+
         # ret = subprocess.call(call_args, shell=True)
         file_path = tf.train.latest_checkpoint(self.checkpoint_path)
         step = get_step(self.checkpoint_path)
-        eval_dir = '{}/{}_{}'.format(self.get_eval_events_dir(),
-                                     int(time.time()), step)
+        eval_dir = '{}/{}_{}_{}'.format(self.get_eval_events_dir(),
+                                        int(time.time()), step, split_name, )
         mkdir_p(eval_dir)
-        call_args.append('--checkpoint_path=' + file_path)
-        call_args.append('--eval_dir={}'.format(eval_dir))
 
-        self.run_command(call_args)
+        script_params.update(
+            checkpoint_path=file_path,
+            eval_dir=eval_dir,
+            dataset_split_name=split_name,
+        )
 
-    def read_summary(self):
-        last_event_dir = get_last_file(self.get_eval_events_dir())
+        self.run_command(
+            self.command_args + dict_to_command_args(script_params))
+
+    def read_summary(self, split_name=VALIDATION_SET_NAME):
+        last_event_dir = get_last_file(
+            self.get_eval_events_dir(),
+            name_filter=lambda x: x.endswith('_' + split_name))
         last_event_file = get_last_file(last_event_dir)
         return read_eval_summary(last_event_file)
 
@@ -217,7 +228,7 @@ def main(config_file):
     train_script_params = {
         'train_dir': checkpoint_path,
         'dataset_name': 'plants',
-        'dataset_split_name': 'train',
+        'dataset_split_name': TRAINING_SET_NAME,
         'dataset_dir': dataset_dir,
         'model_name': model_name,
         'clone_on_cpu': True,
@@ -239,14 +250,14 @@ def main(config_file):
         'checkpoint_path': checkpoint_path,
         'dataset_dir': dataset_dir,
         'dataset_name': 'plants',
-        'dataset_split_name': 'validation',
+        'dataset_split_name': VALIDATION_SET_NAME,
         'model_name': model_name,
     }
 
     eval_script_args = [
-                           sys.executable,
-                           'research/slim/eval_image_classifier.py',
-                       ] + dict_to_command_args(eval_script_params)
+        sys.executable,
+        'research/slim/eval_image_classifier.py',
+    ]
     train_thread = TrainThread(train_script_args)
     # train_thread.start()
 
@@ -265,9 +276,15 @@ def main(config_file):
         train_thread.run_command(
             train_script_args + dict_to_command_args(_train_params))
 
-        eval_thread.eval()
+        eval_thread.eval(script_params=eval_script_params)
+        eval_thread.eval(script_params=eval_script_params,
+                         split_name=TRAINING_SET_NAME)
+        summary = eval_thread.read_summary(
+            split_name=VALIDATION_SET_NAME) or {}
+        summary['training'] = eval_thread.read_summary(
+            split_name=TRAINING_SET_NAME)
+
         step = get_step(checkpoint_path)
-        summary = eval_thread.read_summary()
         summary['step'] = step
         with open('tmp_{}.log'.format(model_name), 'a+') as f:
             f.write('{}\n'.format(summary))
