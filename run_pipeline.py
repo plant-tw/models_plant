@@ -12,10 +12,15 @@ import sys
 
 import click
 import tensorflow as tf
+import tfcoreml
 import yaml
 
 TRAINING_SET_NAME = 'train'
 VALIDATION_SET_NAME = 'validation'
+
+OUTPUT_MODEL_NODE_NAMES_DICT = {
+    'resnet_v2_50': 'resnet_v2_50/predictions/Reshape_1'
+}
 
 
 def read_eval_summary(path_to_events_file):
@@ -60,7 +65,7 @@ start = time.time()
 
 
 def run_command_generator(command_args, check_should_terminate=None):
-    print('run_command', command_args)
+    print('run_command: {}'.format(' '.join(command_args)))
     process = subprocess.Popen(command_args,
                                stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT,
@@ -224,14 +229,7 @@ def dict_to_command_args(d):
     ]
 
 
-@click.command()
-@click.argument('config_file')
-def main(config_file):
-    with open(config_file) as f:
-        config = yaml.load(f)
-
-    print('config: {}'.format(config))
-
+def run_train_eval_loop(config):
     pretrained_checkpoint_path = config['pretrained_checkpoint_path']
     checkpoint_path = config['checkpoint_path']
     dataset_dir = config['dataset_dir']
@@ -256,12 +254,10 @@ def main(config_file):
         'num_preprocessing_threads': '4',
         'trainable_scopes': trainable_scopes,
     }
-
     train_script_args = [
         sys.executable,
         'research/slim/train_image_classifier.py',
     ]
-
     eval_script_params = {
         'alsologtostderr': True,
         'checkpoint_path': checkpoint_path,
@@ -270,21 +266,17 @@ def main(config_file):
         'dataset_split_name': VALIDATION_SET_NAME,
         'model_name': model_name,
     }
-
     eval_script_args = [
         sys.executable,
         'research/slim/eval_image_classifier.py',
     ]
     train_thread = TrainThread(train_script_args)
     # train_thread.start()
-
-
     # No need to start evaluation so early
     # time.sleep(60)
     # eval_script_args = ['which', 'python']
     eval_thread = EvalThread(eval_script_args, checkpoint_path)
     # eval_thread.start()
-
     print('started')
     while True:
         step = get_step(checkpoint_path)
@@ -302,6 +294,8 @@ def main(config_file):
 
         step = get_step(checkpoint_path)
         summary['step'] = step
+        # print(summary)
+        # break
         with open('tmp_{}.log'.format(model_name), 'a+') as f:
             f.write('{}\n'.format(summary))
 
@@ -309,6 +303,81 @@ def main(config_file):
             # eval_thread.join()
             # train_thread.terminate()
             # train_thread.join()
+
+
+def export_graph(config):
+    checkpoint_dir = config['checkpoint_path']
+    checkpoint_path = tf.train.latest_checkpoint(checkpoint_dir)
+    dataset_dir = config['dataset_dir']
+    model_name = config['model_name']
+    freeze_graph_script_path = config['freeze_graph_path']
+
+    inference_graph_path = os.path.join(checkpoint_dir, 'inference_graph.pb')
+    frozen_graph_path = os.path.join(checkpoint_dir, 'frozen_graph.pb')
+
+    script_params = {
+        'alsologtostderr': True,
+        'model_name': model_name,
+        'dataset_name': 'plants',
+        'dataset_dir': dataset_dir,
+        'output_file': inference_graph_path,
+    }
+    run_command([
+        sys.executable, 'research/slim/export_inference_graph.py'
+    ], command_params_dict=script_params)
+
+    run_command([
+        sys.executable, freeze_graph_script_path
+    ], command_params_dict={
+        'input_graph': inference_graph_path,
+        'output_graph': frozen_graph_path,
+        'input_checkpoint': checkpoint_path,
+        'output_node_names': OUTPUT_MODEL_NODE_NAMES_DICT[model_name],
+        'input_binary': 'true',
+    })
+
+    return frozen_graph_path
+
+
+def export_coreml(config, frozen_graph_path):
+    checkpoint_dir = config['checkpoint_path']
+    model_name = config['model_name']
+
+    output_mlmodel_path = os.path.join(checkpoint_dir, 'plant.mlmodel')
+    model_extra_kwargs_dict = {
+        'resnet_v2_50': {
+            'red_bias': -123.68,
+            'green_bias': -116.78,
+            'blue_bias': -103.94,
+        }
+
+    }
+    tfcoreml.convert(
+        tf_model_path=frozen_graph_path,
+        mlmodel_path=output_mlmodel_path,
+        output_feature_names=[
+            '{}:0'.format(OUTPUT_MODEL_NODE_NAMES_DICT[model_name])
+        ],
+        image_input_names=['input:0'],
+        input_name_shape_dict={'input:0': [1, 224, 224, 3]},
+        **model_extra_kwargs_dict.get(model_name, {})
+    )
+
+
+@click.command()
+@click.argument('config_file')
+@click.option('--export-models', is_flag=True)
+def main(config_file, export_models):
+    with open(config_file) as f:
+        config = yaml.load(f)
+
+    print('config: {}'.format(config))
+
+    if not export_models:
+        run_train_eval_loop(config)
+    else:
+        frozen_graph_path = export_graph(config)
+        export_coreml(config, frozen_graph_path)
 
 
 if __name__ == '__main__':
