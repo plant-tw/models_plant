@@ -59,43 +59,61 @@ def get_last_file(directory, name_filter=None):
 start = time.time()
 
 
+def run_command_generator(command_args, check_should_terminate=None):
+    print('run_command', command_args)
+    process = subprocess.Popen(command_args,
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT,
+                               bufsize=1)  # line buffered
+    time_limit = 1
+    while True:
+        poll_result = select([process.stdout], [], [], time_limit)[0]
+        # print(poll_result)
+        if poll_result:
+            line = process.stdout.readline().rstrip()
+            yield line, process
+
+            if check_should_terminate and check_should_terminate(line):
+                process.kill()
+                break
+        else:
+            # print('(no output)')
+            pass
+
+        if process.poll() is not None:
+            # program exited
+            break
+
+    rc = process.poll()
+    print('rc', rc)
+    # return rc
+
+
+def run_command(command_args,
+                command_params_dict=None,
+                convert_line=None, check_should_terminate=None):
+    convert_line = convert_line or (lambda l: l)
+    if command_params_dict:
+        command_args += dict_to_command_args(command_params_dict)
+    for line, _ in run_command_generator(
+            command_args, check_should_terminate=check_should_terminate):
+        print(convert_line(line))
+
+
 class RunCommandThread(threading.Thread):
     def __init__(self, target):
         super(RunCommandThread, self).__init__(target=target)
         self.daemon = True
         self._should_terminate = False
 
-    def run_command(self, command_args):
-        print('run_command', command_args)
-        process = subprocess.Popen(command_args,
-                                   stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT,
-                                   bufsize=1)  # line buffered
-
-        time_limit = 1
-        while True:
-            poll_result = select([process.stdout], [], [], time_limit)[0]
-            # print(poll_result)
-            if poll_result:
-                line = process.stdout.readline()
-                print('{}| {}'.format(self.name, line.rstrip()))
-            else:
-                # print('(no output)')
-                pass
-
-            if process.poll() is not None:
-                # program exited
-                break
-
-            if self._check_should_terminate():
-                print('timeout, kill')
-                process.kill()
-                break
-
-        rc = process.poll()
-        print('rc', rc)
+    def run_command(self, command_args, command_params_dict=None):
         print(time.time() - start)
-        return rc
+        run_command(
+            command_args,
+            command_params_dict=command_params_dict,
+            convert_line=lambda l: '{}| {}'.format(self.name, l),
+            check_should_terminate=lambda l: self._check_should_terminate()
+        )
 
     def _check_should_terminate(self):
         # return time.time() - start > 3
@@ -164,8 +182,7 @@ class EvalThread(RunCommandThread):
             dataset_split_name=split_name,
         )
 
-        self.run_command(
-            self.command_args + dict_to_command_args(script_params))
+        self.run_command(self.command_args, script_params)
 
     def read_summary(self, split_name=VALIDATION_SET_NAME):
         last_event_dir = get_last_file(
@@ -273,8 +290,7 @@ def main(config_file):
         step = get_step(checkpoint_path)
         _train_params = train_script_params.copy()
         _train_params.update(max_number_of_steps=step + eval_every_n_step)
-        train_thread.run_command(
-            train_script_args + dict_to_command_args(_train_params))
+        train_thread.run_command(train_script_args, _train_params)
 
         eval_thread.eval(script_params=eval_script_params)
         eval_thread.eval(script_params=eval_script_params,
