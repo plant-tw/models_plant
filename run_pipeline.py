@@ -282,6 +282,7 @@ def run_train_eval_loop(config):
         step = get_step(checkpoint_path)
         _train_params = train_script_params.copy()
         _train_params.update(max_number_of_steps=step + eval_every_n_step)
+        _train_params.update(config.get('extra_train_params') or {})
         train_thread.run_command(train_script_args, _train_params)
 
         eval_thread.eval(script_params=eval_script_params)
@@ -294,9 +295,10 @@ def run_train_eval_loop(config):
 
         step = get_step(checkpoint_path)
         summary['step'] = step
+        summary['time'] = time.time()
         # print(summary)
         # break
-        with open('tmp_{}.log'.format(model_name), 'a+') as f:
+        with open(join(checkpoint_path, 'accuracy.log'), 'a+') as f:
             f.write('{}\n'.format(summary))
 
             # raise
