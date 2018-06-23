@@ -411,9 +411,9 @@ def do_plot(config, save=True, show=False):
     plt.xlabel('Step')
     plt.ylabel('Accuracy')
     plt.plot(steps, train_accuracy_list,
-             color='r', linewidth=1.0, marker='o', label='Training')
+             color='r', linewidth=1.0, label='Training')
     plt.plot(steps, test_accuracy_list,
-             color='b', linewidth=1.0, marker='o', label='Validation')
+             color='b', linewidth=1.0, label='Validation')
 
     plt.plot(steps, train_accuracy_list_top5,
              color='r', dashes=[3, 1], label='Training Top-5')
