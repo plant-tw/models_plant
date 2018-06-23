@@ -19,6 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import subprocess
 import PIL
 import coremltools
 import math
@@ -30,12 +31,21 @@ import cv2
 import numpy as np
 
 from datasets import dataset_factory
+from keras.preprocessing.image import ImageDataGenerator
+from matplotlib.font_manager import FontManager
 from nets import nets_factory
 from preprocessing import preprocessing_factory
 from datasets import dataset_utils
 from datasets.plants import read_label_file
 from nets import resnet_v2
 from tensorflow.python.training import monitored_session
+import seaborn as sns
+import matplotlib
+
+if os.environ.get('DISPLAY', '') == '':
+    print('no display found. Using non-interactive Agg backend')
+    matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 slim = tf.contrib.slim
 
@@ -180,6 +190,8 @@ def get_info(checkpoint_path=None):
         'Recall_5': slim.metrics.streaming_recall_at_k(
             logits, labels, 5),
     })
+    confusion_matrix = tf.confusion_matrix(labels=labels,
+                                           predictions=predictions)
 
     # Print the summaries to screen.
     for name, value in names_to_values.items():
@@ -214,16 +226,65 @@ def get_info(checkpoint_path=None):
         'labels': labels,
         'logits': logits,
         'predictions': predictions,
+        'confusion_matrix': confusion_matrix,
     }
 
 
-def main(_):
+def get_monitored_session(checkpoint_path):
+    session_creator = monitored_session.ChiefSessionCreator(
+        checkpoint_filename_with_path=checkpoint_path,
+        # scaffold=scaffold,
+        # master=master,
+        # config=config
+    )
+    return monitored_session.MonitoredSession(
+        session_creator=session_creator)
+
+
+def plot_confusion_matrix(confusion_matrix, labels_to_names=None):
+    set_matplot_zh_font()
+    ax = plt.subplot()
+    sns.heatmap(confusion_matrix,
+                annot=False, ax=ax)  # annot=True to annotate cells
+    n = confusion_matrix.shape[0]
+
+    # labels, title and ticks
+    ax.set_xlabel('Predicted labels')
+    ax.set_ylabel('True labels')
+    ax.set_title('Confusion Matrix')
+    axis = [labels_to_names[i] if labels_to_names else i
+            for i in range(n)]
+    ax.xaxis.set_ticklabels(axis, rotation=270)
+    ax.yaxis.set_ticklabels(axis, rotation=0)
+    plt.show()
+
+
+def get_matplot_zh_font():
+    # From https://blog.csdn.net/kesalin/article/details/71214038
+    fm = FontManager()
+    mat_fonts = set(f.name for f in fm.ttflist)
+
+    output = subprocess.check_output('fc-list :lang=zh-tw -f "%{family}\n"',
+                                     shell=True)
+    zh_fonts = set(f.split(',', 1)[0] for f in output.split('\n'))
+    available = list(mat_fonts & zh_fonts)
+
+    return available
+
+
+def set_matplot_zh_font():
+    available = get_matplot_zh_font()
+    if len(available) > 0:
+        plt.rcParams['font.sans-serif'] = [available[0]]  # 指定默认字体
+        plt.rcParams['axes.unicode_minus'] = False
+
+
+def _run_info():
     info = get_info()
     checkpoint_path = info['checkpoint_path']
     num_batches = info['num_batches']
     names_to_updates = info['names_to_updates']
     variables_to_restore = info['variables_to_restore']
-
     feed_dict = {}
     y, _ = info['network_fn'](info['images'], reuse=True)
     with get_monitored_session(checkpoint_path) as sess:
@@ -238,19 +299,18 @@ def main(_):
         res = sess.run(params, feed_dict=feed_dict)
 
         print(res.keys())
-        print(res['predictions'])
-        print(res['labels'])
-        print([x == y for x, y, in zip(res['predictions'], res['labels'])])
+        predictions = res['predictions']
+        labels = res['labels']
+        print(predictions)
+        print(labels)
 
-    return
+        print([x == y for x, y, in zip(predictions, labels)])
+        confusion_matrix = res['confusion_matrix']
+        print('confusion_matrix', confusion_matrix)
 
-    # slim.evaluation.evaluate_once(
-    #     master=FLAGS.master,
-    #     checkpoint_path=checkpoint_path,
-    #     logdir=FLAGS.eval_dir,
-    #     num_evals=num_batches,
-    #     eval_op=list(names_to_updates.values()),
-    #     variables_to_restore=variables_to_restore)
+        plot_confusion_matrix(confusion_matrix,
+                              labels_to_names=info['labels_to_names'])
+
 
 
 def resize(im, target_smallest_size):
