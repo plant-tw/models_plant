@@ -11,9 +11,12 @@ import threading
 import sys
 
 import click
+import json
+import matplotlib
 import tensorflow as tf
 import tfcoreml
 import yaml
+import matplotlib.pyplot as plt
 
 TRAINING_SET_NAME = 'train'
 VALIDATION_SET_NAME = 'validation'
@@ -298,13 +301,19 @@ def run_train_eval_loop(config):
         summary['time'] = time.time()
         # print(summary)
         # break
-        with open(join(checkpoint_path, 'accuracy.log'), 'a+') as f:
+        with open(get_accuracy_log_path(config), 'a+') as f:
             f.write('{}\n'.format(summary))
 
-            # raise
-            # eval_thread.join()
-            # train_thread.terminate()
-            # train_thread.join()
+        do_plot(config)
+        # raise
+        # eval_thread.join()
+        # train_thread.terminate()
+        # train_thread.join()
+
+
+def get_accuracy_log_path(config):
+    checkpoint_path = config['checkpoint_path']
+    return join(checkpoint_path, 'accuracy.log')
 
 
 def export_graph(config):
@@ -366,16 +375,59 @@ def export_coreml(config, frozen_graph_path):
     )
 
 
+def unique(list_, get_key):
+    result = []
+    seen = {}
+    for item in list_:
+        key = get_key(item)
+        if key in seen:
+            continue
+
+        seen[key] = True
+        result.append(item)
+
+    return result
+
+
+def do_plot(config, save=True, show=False):
+    checkpoint_path = config['checkpoint_path']
+    with open(get_accuracy_log_path(config), 'r') as f:
+        records = unique([eval(line.strip()) for line in f.readlines()],
+                         lambda x: x.get('step'))
+
+    steps = list(map(lambda x: x.get('step'), records))
+    test_accuracy_list = list(map(lambda x: x.get('accuracy'), records))
+    train_accuracy_list = list(
+        map(lambda x: x.get('training', {}).get('accuracy'), records))
+
+    plt.plot(steps, train_accuracy_list, color='r', linewidth=1.0, marker='o')
+    plt.plot(steps, test_accuracy_list, color='b', linewidth=1.0, marker='o')
+
+    if save:
+        img_path = join(checkpoint_path, 'accuracy.png')
+        plt.savefig(img_path)
+        print('Chart saved as {}'.format(img_path))
+
+    if show:
+        plt.show()
+
+
 @click.command()
 @click.argument('config_file')
 @click.option('--export-models', is_flag=True)
-def main(config_file, export_models):
+@click.option('--show-plot', is_flag=True)
+@click.option('--export-plot', is_flag=True)
+def main(config_file, export_models, show_plot, export_plot):
     with open(config_file) as f:
         config = yaml.load(f)
 
     print('config: {}'.format(config))
 
-    if not export_models:
+    if show_plot:
+        do_plot(config, show=True)
+    elif export_plot:
+        do_plot(config)
+    elif not export_models:
         run_train_eval_loop(config)
     else:
         frozen_graph_path = export_graph(config)
