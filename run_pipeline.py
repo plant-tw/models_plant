@@ -404,8 +404,23 @@ def do_plot(config, save=True, show=False):
     train_accuracy_list = list(
         map(lambda x: x.get('training', {}).get('accuracy'), records))
 
-    plt.plot(steps, train_accuracy_list, color='r', linewidth=1.0, marker='o')
-    plt.plot(steps, test_accuracy_list, color='b', linewidth=1.0, marker='o')
+    test_accuracy_list_top5 = list(map(lambda x: x.get('recall_5'), records))
+    train_accuracy_list_top5 = list(
+        map(lambda x: x.get('training', {}).get('recall_5'), records))
+
+    plt.xlabel('Step')
+    plt.ylabel('Accuracy')
+    plt.plot(steps, train_accuracy_list,
+             color='r', linewidth=1.0, marker='o', label='Training')
+    plt.plot(steps, test_accuracy_list,
+             color='b', linewidth=1.0, marker='o', label='Validation')
+
+    plt.plot(steps, train_accuracy_list_top5,
+             color='r', dashes=[3, 1], label='Training Top-5')
+    plt.plot(steps, test_accuracy_list_top5,
+             color='b', dashes=[3, 1], label='Validation Top-5')
+
+    plt.legend(loc='best')
 
     if save:
         img_path = join(checkpoint_path, 'accuracy.png')
