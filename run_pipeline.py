@@ -102,7 +102,7 @@ def run_command(command_args,
                 convert_line=None, check_should_terminate=None):
     convert_line = convert_line or (lambda l: l)
     if command_params_dict:
-        command_args += dict_to_command_args(command_params_dict)
+        command_args = command_args + dict_to_command_args(command_params_dict)
     for line, _ in run_command_generator(
             command_args, check_should_terminate=check_should_terminate):
         print(convert_line(line))
