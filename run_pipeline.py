@@ -13,6 +13,10 @@ import sys
 import click
 import json
 import matplotlib
+
+if os.environ.get('DISPLAY', '') == '':
+    print('no display found. Using non-interactive Agg backend')
+    matplotlib.use('Agg')
 import tensorflow as tf
 import tfcoreml
 import yaml
