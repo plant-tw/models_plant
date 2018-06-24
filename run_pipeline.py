@@ -408,6 +408,7 @@ def do_plot(config, save=True, show=False):
     train_accuracy_list_top5 = list(
         map(lambda x: x.get('training', {}).get('recall_5'), records))
 
+    plt.figure()
     plt.xlabel('Step')
     plt.ylabel('Accuracy')
     plt.plot(steps, train_accuracy_list,
