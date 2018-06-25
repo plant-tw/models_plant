@@ -26,7 +26,8 @@ TRAINING_SET_NAME = 'train'
 VALIDATION_SET_NAME = 'validation'
 
 OUTPUT_MODEL_NODE_NAMES_DICT = {
-    'resnet_v2_50': 'resnet_v2_50/predictions/Reshape_1'
+    'resnet_v2_50': 'resnet_v2_50/predictions/Reshape_1',
+    'mobilenet_v1': 'MobilenetV1/Predictions/Reshape_1',
 }
 
 
@@ -364,8 +365,13 @@ def export_coreml(config, frozen_graph_path):
             'red_bias': -123.68,
             'green_bias': -116.78,
             'blue_bias': -103.94,
+        },
+        'mobilenet_v1': {
+            'red_bias': -1.0,
+            'green_bias': -1.0,
+            'blue_bias': -1.0,
+            'image_scale': 2.0 / 255.,
         }
-
     }
     tfcoreml.convert(
         tf_model_path=frozen_graph_path,

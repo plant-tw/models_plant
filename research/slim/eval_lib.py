@@ -53,6 +53,11 @@ _R_MEAN = 123.68
 _G_MEAN = 116.78
 _B_MEAN = 103.94
 
+OUTPUT_MODEL_NODE_NAMES_DICT = {
+    'resnet_v2_50': 'resnet_v2_50/predictions/Reshape_1',
+    'mobilenet_v1': 'MobilenetV1/Predictions/Reshape_1',
+}
+
 tf.app.flags.DEFINE_integer(
     'batch_size', 100, 'The number of samples in each batch.')
 
@@ -65,7 +70,9 @@ tf.app.flags.DEFINE_string(
 
 CHECKPONT_PATH = '/tmp/tfmodel/'
 # CHECKPONT_PATH = 'resnet_v2_50_plants_non_exif'
-CHECKPONT_PATH = 'resnet_v2_50_plants_0426'
+# CHECKPONT_PATH = 'resnet_v2_50_plants_0426'
+CHECKPONT_PATH = 'resnet_v2_50_plants_0617'
+CHECKPONT_PATH = 'experiments/mobilenet_v1_plants_0620'
 MODEL_DIR = os.environ.get('MODEL_DIR') or CHECKPONT_PATH
 tf.app.flags.DEFINE_string(
     'checkpoint_path', CHECKPONT_PATH,
@@ -96,8 +103,10 @@ tf.app.flags.DEFINE_integer(
     'evaluate the VGG and ResNet architectures which do not use a background '
     'class for the ImageNet dataset.')
 
+# model_name = 'resnet_v2_50'
+model_name = 'mobilenet_v1'
 tf.app.flags.DEFINE_string(
-    'model_name', 'resnet_v2_50', 'The name of the architecture to evaluate.')
+    'model_name', model_name, 'The name of the architecture to evaluate.')
 
 tf.app.flags.DEFINE_string(
     'preprocessing_name', None,
@@ -132,9 +141,10 @@ def get_info(checkpoint_path=None):
     ####################
     # Select the model #
     ####################
+    num_classes = (dataset.num_classes - FLAGS.labels_offset)
     network_fn = nets_factory.get_network_fn(
         FLAGS.model_name,
-        num_classes=(dataset.num_classes - FLAGS.labels_offset),
+        num_classes=num_classes,
         is_training=False)
 
     ##############################################################
@@ -191,6 +201,7 @@ def get_info(checkpoint_path=None):
             logits, labels, 5),
     })
     confusion_matrix = tf.confusion_matrix(labels=labels,
+                                           num_classes=num_classes,
                                            predictions=predictions)
 
     # Print the summaries to screen.
@@ -380,24 +391,53 @@ def central_crop(im, w, h):
         (half_w - w / 2, half_h - h / 2, half_w + w / 2, half_h + h / 2))
 
 
-def pre_process(im, shift=True):
+def pre_process_resnet(im, coreml=False):
     target_smallest_size = 224
     im1 = resize(im, target_smallest_size)
     im2 = central_crop(im1, target_smallest_size, target_smallest_size)
     arr = np.asarray(im2).astype(np.float32)
 
-    if shift:
+    if not coreml:
         arr[:, :, 0] -= _R_MEAN
         arr[:, :, 1] -= _G_MEAN
         arr[:, :, 2] -= _B_MEAN
     return arr
 
 
+def central_crop_by_fraction(im, central_fraction):
+    w = im.size[0]
+    h = im.size[1]
+    return central_crop(im, w * central_fraction, h * central_fraction)
+
+
+def pre_process_mobilenet(im, coreml=False):
+    # 參考 https://github.com/tensorflow/models/blob/master/research/slim/preprocessing/inception_preprocessing.py
+    # 裡的 preprocess_for_eval
+    im1 = central_crop_by_fraction(im, 0.875)
+    target_smallest_size = 224
+    im2 = im1.resize((target_smallest_size, target_smallest_size),
+                     PIL.Image.BILINEAR)
+    arr = np.asarray(im2).astype(np.float32)
+    if not coreml:
+        arr /= 255.0
+        arr -= 0.5
+        arr *= 2.0
+    return arr
+
+
+def pre_process(im, coreml=False):
+    return {
+        'resnet_v2_50': pre_process_resnet,
+        'mobilenet_v1': pre_process_mobilenet,
+    }[model_name](im, coreml=coreml)
+
+
 def _inference_by_pb():
     # http://www.cnblogs.com/arkenstone/p/7551270.html
     filenames = [
         ('20180330/1lZsRrQzj/1lZsRrQzj_5.jpg', u'通泉草'),
-        ('20180330/4PdXwYcGt/4PdXwYcGt_5.jpg', u'酢漿草'),
+        ('20180330/iUTbDxEoT/iUTbDxEoT_0.jpg', u'杜鵑花仙子'),
+        # ('20180330/4PdXwYcGt/4PdXwYcGt_5.jpg', u'酢漿草'),
     ]
     for filename, label in filenames:
         filename = os.path.join(DATASET_DIR, filename)
@@ -426,7 +466,9 @@ def run_inference_by_pb(image_np):
         graph = tf.import_graph_def(graph_def, name='')
         with tf.Session(graph=graph) as sess:
             input_tensor_name = "input:0"
-            output_tensor_name = "resnet_v2_50/predictions/Reshape_1:0"
+            # output_tensor_name = "resnet_v2_50/predictions/Reshape_1:0"
+            output_tensor_name = OUTPUT_MODEL_NODE_NAMES_DICT[
+                                     model_name] + ":0"
             input_tensor = sess.graph.get_tensor_by_name(
                 input_tensor_name)  # get input tensor
             output_tensor = sess.graph.get_tensor_by_name(
@@ -440,7 +482,8 @@ def _inference_by_coreml():
     labels_to_names = read_label_file(FLAGS.dataset_dir)
     filenames = [
         ('20180330/1lZsRrQzj/1lZsRrQzj_5.jpg', u'通泉草'),
-        ('20180330/4PdXwYcGt/4PdXwYcGt_5.jpg', u'酢漿草'),
+        ('20180330/iUTbDxEoT/iUTbDxEoT_0.jpg', u'杜鵑花仙子'),
+        # ('20180330/4PdXwYcGt/4PdXwYcGt_5.jpg', u'酢漿草'),
     ]
     for filename, label in filenames:
         filename = os.path.join(DATASET_DIR, filename)
@@ -462,33 +505,48 @@ def _inference_by_coreml():
 def run_inference_by_coreml(image_np):
     frozen_model_file = '%s/frozen_graph.pb' % MODEL_DIR
     coreml_model_file = '%s/plant.mlmodel' % MODEL_DIR
-    image_np = pre_process(image_np, shift=False)
-    image_size = 224
+    image_np = pre_process(image_np, coreml=True)
 
     image = Image.fromarray(image_np.astype('int8'), 'RGB')
     input_tensor_shapes = {
-        "input:0": [1, image_size, image_size, 3]}  # batch size is 1
-    output_tensor_names = ['resnet_v2_50/predictions/Reshape_1:0']
+        "input:0": [1, image_np.shape[0], image_np.shape[1],
+                    3]}  # batch size is 1
+    output_tensor_name = OUTPUT_MODEL_NODE_NAMES_DICT[model_name] + ":0"
 
     coreml_model = coremltools.models.MLModel(coreml_model_file)
 
     convert_model = False
+    # convert_model = True
     if convert_model:
+        extra_args = {
+            'resnet_v2_50': {
+                'red_bias': -_R_MEAN,
+                'green_bias': -_G_MEAN,
+                'blue_bias': -_B_MEAN,
+            },
+            'mobilenet_v1': {
+                'red_bias': -1.0,
+                'green_bias': -1.0,
+                'blue_bias': -1.0,
+                'image_scale': 2.0 / 255.,
+            }
+        }[model_name]
         coreml_model = tfcoreml.convert(
             tf_model_path=frozen_model_file,
             mlmodel_path=coreml_model_file.replace('.mlmodel',
                                                    '_test.mlmodel'),
             input_name_shape_dict=input_tensor_shapes,
-            output_feature_names=output_tensor_names,
+            output_feature_names=[output_tensor_name],
             image_input_names=['input:0'],
-            red_bias=-_R_MEAN,
-            green_bias=-_G_MEAN,
-            blue_bias=-_B_MEAN,
+            **extra_args
         )
 
     coreml_inputs = {'input__0': image}
     coreml_output = coreml_model.predict(coreml_inputs, useCPUOnly=False)
-    probs = coreml_output['resnet_v2_50__predictions__Reshape_1__0'].flatten()
+
+    # example output: 'resnet_v2_50__predictions__Reshape_1__0'
+    probs = coreml_output[
+        output_tensor_name.replace('/', '__').replace(':', '__')].flatten()
     return probs
 
 
