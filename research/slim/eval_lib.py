@@ -243,9 +243,30 @@ def get_monitored_session(checkpoint_path):
 
 def plot_confusion_matrix(confusion_matrix, labels_to_names=None):
     set_matplot_zh_font()
-    ax = plt.subplot()
-    sns.heatmap(confusion_matrix,
-                annot=False, ax=ax)  # annot=True to annotate cells
+    # ax = plt.subplot()
+    fig, ax = plt.subplots()
+    # the size of A4 paper
+    fig.set_size_inches(18, 15)
+
+    # https://stackoverflow.com/questions/22548813/python-color-map-but-with-all-zero-values-mapped-to-black
+    # confusion_matrix = np.ma.masked_where(confusion_matrix < 0.01,
+    #                                       confusion_matrix)
+    cmap = plt.get_cmap('Accent')
+    # cmap = plt.get_cmap('coolwarm')
+    # cmap = plt.get_cmap('plasma')
+    # cmap = plt.get_cmap('Blues')
+    # cmap.set_bad(color='black')
+
+    mask = np.zeros_like(confusion_matrix)
+    mask[confusion_matrix == 0] = True
+    # sns.set(font_scale=1)
+    with sns.axes_style('darkgrid'):
+        sns.heatmap(confusion_matrix,
+                    linewidths=0.2,
+                    linecolor='#eeeeee',
+                    xticklabels=True,
+                    yticklabels=True,
+                    mask=mask, annot=False, ax=ax, cmap=cmap)
     n = confusion_matrix.shape[0]
 
     # labels, title and ticks
@@ -256,6 +277,8 @@ def plot_confusion_matrix(confusion_matrix, labels_to_names=None):
             for i in range(n)]
     ax.xaxis.set_ticklabels(axis, rotation=270)
     ax.yaxis.set_ticklabels(axis, rotation=0)
+    plt.savefig('confusion_matrix.png')
+    print('plot shown')
     plt.show()
 
 
@@ -280,6 +303,8 @@ def set_matplot_zh_font():
 
 
 def _run_info():
+    # np.set_printoptions(edgeitems=10)
+
     info = get_info()
     checkpoint_path = info['checkpoint_path']
     num_batches = info['num_batches']
@@ -287,28 +312,57 @@ def _run_info():
     variables_to_restore = info['variables_to_restore']
     feed_dict = {}
     y, _ = info['network_fn'](info['images'], reuse=True)
+
+    all_predictions = []
+    all_labels = []
+    num_categories = len(info['labels_to_names'])
+    all_confusion_matrix = None
+
+    all_confusion_matrix = np.loadtxt('confusion_matrix.txt')
+    plot_confusion_matrix(all_confusion_matrix,
+                          labels_to_names=info['labels_to_names'])
+    return
     with get_monitored_session(checkpoint_path) as sess:
-        params = {
-            k: v
-            for k, v in info.items()
-            if isinstance(v, tf.Tensor)
-        }
-        params.update(
-            y=y,
-        )
-        res = sess.run(params, feed_dict=feed_dict)
+        for i in range(int(math.ceil(num_batches))):
+            break
+            print('batch #{} of {}'.format(i, num_batches))
+            params = {
+                k: v
+                for k, v in info.items()
+                if isinstance(v, tf.Tensor)
+            }
+            params.update(
+                y=y,
+            )
+            res = sess.run(params, feed_dict=feed_dict)
 
-        print(res.keys())
-        predictions = res['predictions']
-        labels = res['labels']
-        print(predictions)
-        print(labels)
+            print(res.keys())
+            predictions = res['predictions']
+            labels = res['labels']
+            print(predictions)
+            print(labels)
+            print('len labels', len(labels))
+            all_predictions.extend(predictions)
+            all_labels.extend(labels)
 
-        print([x == y for x, y, in zip(predictions, labels)])
-        confusion_matrix = res['confusion_matrix']
-        print('confusion_matrix', confusion_matrix)
+            # print([x == y for x, y, in zip(predictions, labels)])
+            confusion_matrix = res['confusion_matrix']
+            print('confusion_matrix')
+            print(confusion_matrix)
+            if all_confusion_matrix is None:
+                all_confusion_matrix = np.matrix(confusion_matrix)
+            else:
+                all_confusion_matrix += np.matrix(confusion_matrix)
 
-        plot_confusion_matrix(confusion_matrix,
+            print('all_confusion_matrix')
+            print(all_confusion_matrix)
+            # if i > 5:
+            #     break
+            np.savetxt('confusion_matrix.txt', all_confusion_matrix,
+                       fmt='% 3d')
+
+        all_confusion_matrix = np.loadtxt('confusion_matrix.txt')
+        plot_confusion_matrix(all_confusion_matrix,
                               labels_to_names=info['labels_to_names'])
 
 
