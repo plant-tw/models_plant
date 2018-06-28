@@ -68,14 +68,14 @@ tf.app.flags.DEFINE_integer(
 tf.app.flags.DEFINE_string(
     'master', '', 'The address of the TensorFlow master to use.')
 
-CHECKPONT_PATH = '/tmp/tfmodel/'
+CHECKPOINT_PATH = '/tmp/tfmodel/'
 # CHECKPONT_PATH = 'resnet_v2_50_plants_non_exif'
 # CHECKPONT_PATH = 'resnet_v2_50_plants_0426'
-CHECKPONT_PATH = 'resnet_v2_50_plants_0617'
-CHECKPONT_PATH = 'experiments/mobilenet_v1_plants_0620'
-MODEL_DIR = os.environ.get('MODEL_DIR') or CHECKPONT_PATH
+CHECKPOINT_PATH = 'resnet_v2_50_plants_0617'
+CHECKPOINT_PATH = 'experiments/mobilenet_v1_plants_0620'
+MODEL_DIR = os.environ.get('MODEL_DIR') or CHECKPOINT_PATH
 tf.app.flags.DEFINE_string(
-    'checkpoint_path', CHECKPONT_PATH,
+    'checkpoint_path', CHECKPOINT_PATH,
     'The directory where the model was written to or an absolute path to a '
     'checkpoint file.')
 
@@ -124,6 +124,19 @@ tf.app.flags.DEFINE_integer(
 FLAGS = tf.app.flags.FLAGS
 
 
+def inspect_tfrecords(tfrecords_filename):
+    record_iterator = tf.python_io.tf_record_iterator(path=tfrecords_filename)
+
+    examples = []
+    for string_record in record_iterator:
+        example = tf.train.Example()
+        example.ParseFromString(string_record)
+        examples.append(example)
+        # print(example)
+
+    return examples
+
+
 def get_info(checkpoint_path=None):
     # if not FLAGS.dataset_dir:
     #   raise ValueError('You must supply the dataset directory with --dataset_dir')
@@ -152,9 +165,12 @@ def get_info(checkpoint_path=None):
     ##############################################################
     provider = slim.dataset_data_provider.DatasetDataProvider(
         dataset,
+        num_epochs=1,  # 每張只讀一次
+        # num_readers=1,
         shuffle=False,
         common_queue_capacity=2 * FLAGS.batch_size,
         common_queue_min=FLAGS.batch_size)
+    # common_queue_min=FLAGS.batch_size)
     [image, label] = provider.get(['image', 'label'])
     label -= FLAGS.labels_offset
     raw_images = image
@@ -175,6 +191,7 @@ def get_info(checkpoint_path=None):
         [image, label],
         batch_size=FLAGS.batch_size,
         num_threads=FLAGS.num_preprocessing_threads,
+        allow_smaller_final_batch=True,
         capacity=5 * FLAGS.batch_size)
 
     ####################
@@ -252,7 +269,8 @@ def get_monitored_session(checkpoint_path):
         session_creator=session_creator)
 
 
-def plot_confusion_matrix(confusion_matrix, labels_to_names=None):
+def plot_confusion_matrix(confusion_matrix, labels_to_names=None,
+                          save_dir='.'):
     set_matplot_zh_font()
     # ax = plt.subplot()
     fig, ax = plt.subplots()
@@ -288,7 +306,8 @@ def plot_confusion_matrix(confusion_matrix, labels_to_names=None):
             for i in range(n)]
     ax.xaxis.set_ticklabels(axis, rotation=270)
     ax.yaxis.set_ticklabels(axis, rotation=0)
-    plt.savefig('confusion_matrix.png')
+
+    plt.savefig(os.path.join(save_dir, 'confusion_matrix.png'))
     print('plot shown')
     plt.show()
 
@@ -314,10 +333,9 @@ def set_matplot_zh_font():
 
 
 def _run_info():
-    # np.set_printoptions(edgeitems=10)
-
     info = get_info()
     checkpoint_path = info['checkpoint_path']
+    checkpoint_dir_path = os.path.dirname(checkpoint_path)
     num_batches = info['num_batches']
     names_to_updates = info['names_to_updates']
     variables_to_restore = info['variables_to_restore']
@@ -329,32 +347,52 @@ def _run_info():
     num_categories = len(info['labels_to_names'])
     all_confusion_matrix = None
 
-    all_confusion_matrix = np.loadtxt('confusion_matrix.txt')
-    plot_confusion_matrix(all_confusion_matrix,
-                          labels_to_names=info['labels_to_names'])
-    return
+    # all_confusion_matrix = np.loadtxt('confusion_matrix.txt')
+    # plot_confusion_matrix(all_confusion_matrix,
+    #                       labels_to_names=info['labels_to_names'])
+    # return
+    confusion_matrix_txt = os.path.join(checkpoint_dir_path,
+                                        'confusion_matrix.txt')
     with get_monitored_session(checkpoint_path) as sess:
         for i in range(int(math.ceil(num_batches))):
-            break
+            # break
             print('batch #{} of {}'.format(i, num_batches))
             params = {
                 k: v
                 for k, v in info.items()
                 if isinstance(v, tf.Tensor)
+                   and k in [
+                       'labels',
+                       'images',
+                       # 'raw_images',
+                       # 'logits',
+                       'predictions',
+                       'confusion_matrix',
+                   ]
             }
-            params.update(
-                y=y,
-            )
-            res = sess.run(params, feed_dict=feed_dict)
+            # params.update(
+            #     y=y,
+            # )
+            # params = {'labels': info['labels']}
+            try:
+                res = sess.run(params, feed_dict=feed_dict)
+            except:
+                import traceback
+                traceback.print_exc()
+                raise
+                # break
 
-            print(res.keys())
-            predictions = res['predictions']
             labels = res['labels']
-            print(predictions)
-            print(labels)
+            # print(labels)
+            # print(res.keys())
+            # predictions = res['predictions']
+            # print(predictions)
             print('len labels', len(labels))
-            all_predictions.extend(predictions)
+            # all_predictions.extend(predictions)
             all_labels.extend(labels)
+            print('all_labels length', len(all_labels))
+            print('all_labels unique length', len(set(all_labels)))
+            # continue
 
             # print([x == y for x, y, in zip(predictions, labels)])
             confusion_matrix = res['confusion_matrix']
@@ -367,14 +405,38 @@ def _run_info():
 
             print('all_confusion_matrix')
             print(all_confusion_matrix)
-            # if i > 5:
-            #     break
-            np.savetxt('confusion_matrix.txt', all_confusion_matrix,
+            np.savetxt(confusion_matrix_txt, all_confusion_matrix,
                        fmt='% 3d')
+            # if i > 0:
+            #     break
 
-        all_confusion_matrix = np.loadtxt('confusion_matrix.txt')
+        from collections import Counter
+        c = Counter(all_labels)
+        kv_pairs = sorted(dict(c).items(), key=lambda p: p[0])
+        for k, v in kv_pairs:
+            print(k, v)
+
+        all_confusion_matrix = np.loadtxt(confusion_matrix_txt)
         plot_confusion_matrix(all_confusion_matrix,
-                              labels_to_names=info['labels_to_names'])
+                              labels_to_names=info['labels_to_names'],
+                              save_dir=checkpoint_dir_path)
+
+
+def inspect_datasets():
+    examples = []
+    for i in range(5):
+        tfrecords_filename = os.path.join(
+            DATASET_DIR,
+            'plants_validation_{:05d}-of-00005.tfrecord'.format(i))
+        examples.extend(inspect_tfrecords(tfrecords_filename))
+    print(len(examples))
+    examples = []
+    for i in range(5):
+        tfrecords_filename = os.path.join(
+            DATASET_DIR,
+            'plants_train_{:05d}-of-00005.tfrecord'.format(i))
+        examples.extend(inspect_tfrecords(tfrecords_filename))
+    print(len(examples))
 
 
 
@@ -440,7 +502,7 @@ def _inference_by_pb():
         # ('20180330/4PdXwYcGt/4PdXwYcGt_5.jpg', u'酢漿草'),
     ]
     for filename, label in filenames:
-        filename = os.path.join(DATASET_DIR, filename)
+        filename = dataset_dir_file(filename)
         # image_np = cv2.imread(filename)
         result = run_inference_on_file(filename)
         index = result['prediction_label']
@@ -449,6 +511,11 @@ def _inference_by_pb():
         print("Prediction name:", prediction_name)
         print("Top 3 Prediction label index:", ' '.join(result['top_n_names']))
         assert prediction_name == label
+
+
+def dataset_dir_file(filename):
+    filename = os.path.join(DATASET_DIR, filename)
+    return filename
 
 
 def run_inference_by_pb(image_np):
