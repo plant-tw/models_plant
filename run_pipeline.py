@@ -385,6 +385,32 @@ def export_coreml(config, frozen_graph_path):
     )
 
 
+def export_tflite(config, frozen_graph_path):
+    checkpoint_dir = config['checkpoint_path']
+    checkpoint_path = tf.train.latest_checkpoint(checkpoint_dir)
+    dataset_dir = config['dataset_dir']
+    model_name = config['model_name']
+    freeze_graph_script_path = config['freeze_graph_path']
+
+    inference_graph_path = os.path.join(checkpoint_dir, 'inference_graph.pb')
+    tflite_path = os.path.join(checkpoint_dir, 'plant.tflite')
+
+    script_params = {
+        'input_file': frozen_graph_path,
+        'input_format': 'TENSORFLOW_GRAPHDEF',
+        'output_format': 'TFLITE',
+        'output_file': tflite_path,
+        'inference_type': 'FLOAT',
+        'input_type': 'FLOAT',
+        'input_arrays': 'input',
+        'output_arrays': OUTPUT_MODEL_NODE_NAMES_DICT[model_name],
+        'input_shapes': '1,224,224,3'
+    }
+    run_command([
+        'toco',
+    ], command_params_dict=script_params)
+
+
 def unique(list_, get_key):
     result = []
     seen = {}
@@ -458,6 +484,7 @@ def main(config_file, export_models, show_plot, export_plot):
     else:
         frozen_graph_path = export_graph(config)
         export_coreml(config, frozen_graph_path)
+        export_tflite(config, frozen_graph_path)
 
 
 if __name__ == '__main__':
