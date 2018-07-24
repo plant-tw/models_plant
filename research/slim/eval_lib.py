@@ -19,6 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import subprocess
 import PIL
 import coremltools
 import math
@@ -30,18 +31,32 @@ import cv2
 import numpy as np
 
 from datasets import dataset_factory
+from keras.preprocessing.image import ImageDataGenerator
+from matplotlib.font_manager import FontManager
 from nets import nets_factory
 from preprocessing import preprocessing_factory
 from datasets import dataset_utils
 from datasets.plants import read_label_file
 from nets import resnet_v2
 from tensorflow.python.training import monitored_session
+import seaborn as sns
+import matplotlib
+
+if os.environ.get('DISPLAY', '') == '':
+    print('no display found. Using non-interactive Agg backend')
+    matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 slim = tf.contrib.slim
 
 _R_MEAN = 123.68
 _G_MEAN = 116.78
 _B_MEAN = 103.94
+
+OUTPUT_MODEL_NODE_NAMES_DICT = {
+    'resnet_v2_50': 'resnet_v2_50/predictions/Reshape_1',
+    'mobilenet_v1': 'MobilenetV1/Predictions/Reshape_1',
+}
 
 tf.app.flags.DEFINE_integer(
     'batch_size', 100, 'The number of samples in each batch.')
@@ -53,12 +68,14 @@ tf.app.flags.DEFINE_integer(
 tf.app.flags.DEFINE_string(
     'master', '', 'The address of the TensorFlow master to use.')
 
-CHECKPONT_PATH = '/tmp/tfmodel/'
+CHECKPOINT_PATH = '/tmp/tfmodel/'
 # CHECKPONT_PATH = 'resnet_v2_50_plants_non_exif'
-CHECKPONT_PATH = 'resnet_v2_50_plants_0426'
-MODEL_DIR = os.environ.get('MODEL_DIR') or CHECKPONT_PATH
+# CHECKPONT_PATH = 'resnet_v2_50_plants_0426'
+CHECKPOINT_PATH = 'resnet_v2_50_plants_0617'
+CHECKPOINT_PATH = 'experiments/mobilenet_v1_plants_0620'
+MODEL_DIR = os.environ.get('MODEL_DIR') or CHECKPOINT_PATH
 tf.app.flags.DEFINE_string(
-    'checkpoint_path', CHECKPONT_PATH,
+    'checkpoint_path', CHECKPOINT_PATH,
     'The directory where the model was written to or an absolute path to a '
     'checkpoint file.')
 
@@ -86,8 +103,10 @@ tf.app.flags.DEFINE_integer(
     'evaluate the VGG and ResNet architectures which do not use a background '
     'class for the ImageNet dataset.')
 
+# model_name = 'resnet_v2_50'
+model_name = 'mobilenet_v1'
 tf.app.flags.DEFINE_string(
-    'model_name', 'resnet_v2_50', 'The name of the architecture to evaluate.')
+    'model_name', model_name, 'The name of the architecture to evaluate.')
 
 tf.app.flags.DEFINE_string(
     'preprocessing_name', None,
@@ -103,6 +122,19 @@ tf.app.flags.DEFINE_integer(
     'eval_image_size', None, 'Eval image size')
 
 FLAGS = tf.app.flags.FLAGS
+
+
+def inspect_tfrecords(tfrecords_filename):
+    record_iterator = tf.python_io.tf_record_iterator(path=tfrecords_filename)
+
+    examples = []
+    for string_record in record_iterator:
+        example = tf.train.Example()
+        example.ParseFromString(string_record)
+        examples.append(example)
+        # print(example)
+
+    return examples
 
 
 def get_info(checkpoint_path=None):
@@ -122,9 +154,10 @@ def get_info(checkpoint_path=None):
     ####################
     # Select the model #
     ####################
+    num_classes = (dataset.num_classes - FLAGS.labels_offset)
     network_fn = nets_factory.get_network_fn(
         FLAGS.model_name,
-        num_classes=(dataset.num_classes - FLAGS.labels_offset),
+        num_classes=num_classes,
         is_training=False)
 
     ##############################################################
@@ -132,9 +165,12 @@ def get_info(checkpoint_path=None):
     ##############################################################
     provider = slim.dataset_data_provider.DatasetDataProvider(
         dataset,
+        num_epochs=1,  # 每張只讀一次
+        # num_readers=1,
         shuffle=False,
         common_queue_capacity=2 * FLAGS.batch_size,
         common_queue_min=FLAGS.batch_size)
+    # common_queue_min=FLAGS.batch_size)
     [image, label] = provider.get(['image', 'label'])
     label -= FLAGS.labels_offset
     raw_images = image
@@ -155,6 +191,7 @@ def get_info(checkpoint_path=None):
         [image, label],
         batch_size=FLAGS.batch_size,
         num_threads=FLAGS.num_preprocessing_threads,
+        allow_smaller_final_batch=True,
         capacity=5 * FLAGS.batch_size)
 
     ####################
@@ -180,6 +217,9 @@ def get_info(checkpoint_path=None):
         'Recall_5': slim.metrics.streaming_recall_at_k(
             logits, labels, 5),
     })
+    confusion_matrix = tf.confusion_matrix(labels=labels,
+                                           num_classes=num_classes,
+                                           predictions=predictions)
 
     # Print the summaries to screen.
     for name, value in names_to_values.items():
@@ -214,43 +254,190 @@ def get_info(checkpoint_path=None):
         'labels': labels,
         'logits': logits,
         'predictions': predictions,
+        'confusion_matrix': confusion_matrix,
     }
 
 
-def main(_):
+def get_monitored_session(checkpoint_path):
+    session_creator = monitored_session.ChiefSessionCreator(
+        checkpoint_filename_with_path=checkpoint_path,
+        # scaffold=scaffold,
+        # master=master,
+        # config=config
+    )
+    return monitored_session.MonitoredSession(
+        session_creator=session_creator)
+
+
+def plot_confusion_matrix(confusion_matrix, labels_to_names=None,
+                          save_dir='.'):
+    set_matplot_zh_font()
+    # ax = plt.subplot()
+    fig, ax = plt.subplots()
+    # the size of A4 paper
+    fig.set_size_inches(18, 15)
+
+    # https://stackoverflow.com/questions/22548813/python-color-map-but-with-all-zero-values-mapped-to-black
+    # confusion_matrix = np.ma.masked_where(confusion_matrix < 0.01,
+    #                                       confusion_matrix)
+    cmap = plt.get_cmap('Accent')
+    # cmap = plt.get_cmap('coolwarm')
+    # cmap = plt.get_cmap('plasma')
+    # cmap = plt.get_cmap('Blues')
+    # cmap.set_bad(color='black')
+
+    mask = np.zeros_like(confusion_matrix)
+    mask[confusion_matrix == 0] = True
+    # sns.set(font_scale=1)
+    with sns.axes_style('darkgrid'):
+        sns.heatmap(confusion_matrix,
+                    linewidths=0.2,
+                    linecolor='#eeeeee',
+                    xticklabels=True,
+                    yticklabels=True,
+                    mask=mask, annot=False, ax=ax, cmap=cmap)
+    n = confusion_matrix.shape[0]
+
+    # labels, title and ticks
+    ax.set_xlabel('Predicted labels')
+    ax.set_ylabel('True labels')
+    ax.set_title('Confusion Matrix')
+    axis = [labels_to_names[i] if labels_to_names else i
+            for i in range(n)]
+    ax.xaxis.set_ticklabels(axis, rotation=270)
+    ax.yaxis.set_ticklabels(axis, rotation=0)
+
+    plt.savefig(os.path.join(save_dir, 'confusion_matrix.png'))
+    print('plot shown')
+    plt.show()
+
+
+def get_matplot_zh_font():
+    # From https://blog.csdn.net/kesalin/article/details/71214038
+    fm = FontManager()
+    mat_fonts = set(f.name for f in fm.ttflist)
+
+    output = subprocess.check_output('fc-list :lang=zh-tw -f "%{family}\n"',
+                                     shell=True)
+    zh_fonts = set(f.split(',', 1)[0] for f in output.split('\n'))
+    available = list(mat_fonts & zh_fonts)
+
+    return available
+
+
+def set_matplot_zh_font():
+    available = get_matplot_zh_font()
+    if len(available) > 0:
+        plt.rcParams['font.sans-serif'] = [available[0]]  # 指定默认字体
+        plt.rcParams['axes.unicode_minus'] = False
+
+
+def _run_info():
     info = get_info()
     checkpoint_path = info['checkpoint_path']
+    checkpoint_dir_path = os.path.dirname(checkpoint_path)
     num_batches = info['num_batches']
     names_to_updates = info['names_to_updates']
     variables_to_restore = info['variables_to_restore']
-
     feed_dict = {}
     y, _ = info['network_fn'](info['images'], reuse=True)
+
+    all_predictions = []
+    all_labels = []
+    num_categories = len(info['labels_to_names'])
+    all_confusion_matrix = None
+
+    # all_confusion_matrix = np.loadtxt('confusion_matrix.txt')
+    # plot_confusion_matrix(all_confusion_matrix,
+    #                       labels_to_names=info['labels_to_names'])
+    # return
+    confusion_matrix_txt = os.path.join(checkpoint_dir_path,
+                                        'confusion_matrix.txt')
     with get_monitored_session(checkpoint_path) as sess:
-        params = {
-            k: v
-            for k, v in info.items()
-            if isinstance(v, tf.Tensor)
-        }
-        params.update(
-            y=y,
-        )
-        res = sess.run(params, feed_dict=feed_dict)
+        for i in range(int(math.ceil(num_batches))):
+            # break
+            print('batch #{} of {}'.format(i, num_batches))
+            params = {
+                k: v
+                for k, v in info.items()
+                if isinstance(v, tf.Tensor)
+                   and k in [
+                       'labels',
+                       'images',
+                       # 'raw_images',
+                       # 'logits',
+                       'predictions',
+                       'confusion_matrix',
+                   ]
+            }
+            # params.update(
+            #     y=y,
+            # )
+            # params = {'labels': info['labels']}
+            try:
+                res = sess.run(params, feed_dict=feed_dict)
+            except:
+                import traceback
+                traceback.print_exc()
+                raise
+                # break
 
-        print(res.keys())
-        print(res['predictions'])
-        print(res['labels'])
-        print([x == y for x, y, in zip(res['predictions'], res['labels'])])
+            labels = res['labels']
+            # print(labels)
+            # print(res.keys())
+            # predictions = res['predictions']
+            # print(predictions)
+            print('len labels', len(labels))
+            # all_predictions.extend(predictions)
+            all_labels.extend(labels)
+            print('all_labels length', len(all_labels))
+            print('all_labels unique length', len(set(all_labels)))
+            # continue
 
-    return
+            # print([x == y for x, y, in zip(predictions, labels)])
+            confusion_matrix = res['confusion_matrix']
+            print('confusion_matrix')
+            print(confusion_matrix)
+            if all_confusion_matrix is None:
+                all_confusion_matrix = np.matrix(confusion_matrix)
+            else:
+                all_confusion_matrix += np.matrix(confusion_matrix)
 
-    # slim.evaluation.evaluate_once(
-    #     master=FLAGS.master,
-    #     checkpoint_path=checkpoint_path,
-    #     logdir=FLAGS.eval_dir,
-    #     num_evals=num_batches,
-    #     eval_op=list(names_to_updates.values()),
-    #     variables_to_restore=variables_to_restore)
+            print('all_confusion_matrix')
+            print(all_confusion_matrix)
+            np.savetxt(confusion_matrix_txt, all_confusion_matrix,
+                       fmt='% 3d')
+            # if i > 0:
+            #     break
+
+        from collections import Counter
+        c = Counter(all_labels)
+        kv_pairs = sorted(dict(c).items(), key=lambda p: p[0])
+        for k, v in kv_pairs:
+            print(k, v)
+
+        all_confusion_matrix = np.loadtxt(confusion_matrix_txt)
+        plot_confusion_matrix(all_confusion_matrix,
+                              labels_to_names=info['labels_to_names'],
+                              save_dir=checkpoint_dir_path)
+
+
+def inspect_datasets():
+    examples = []
+    for i in range(5):
+        tfrecords_filename = os.path.join(
+            DATASET_DIR,
+            'plants_validation_{:05d}-of-00005.tfrecord'.format(i))
+        examples.extend(inspect_tfrecords(tfrecords_filename))
+    print(len(examples))
+    examples = []
+    for i in range(5):
+        tfrecords_filename = os.path.join(
+            DATASET_DIR,
+            'plants_train_{:05d}-of-00005.tfrecord'.format(i))
+        examples.extend(inspect_tfrecords(tfrecords_filename))
+    print(len(examples))
+
 
 
 def resize(im, target_smallest_size):
@@ -266,27 +453,56 @@ def central_crop(im, w, h):
         (half_w - w / 2, half_h - h / 2, half_w + w / 2, half_h + h / 2))
 
 
-def pre_process(im, shift=True):
+def pre_process_resnet(im, coreml=False):
     target_smallest_size = 224
     im1 = resize(im, target_smallest_size)
     im2 = central_crop(im1, target_smallest_size, target_smallest_size)
     arr = np.asarray(im2).astype(np.float32)
 
-    if shift:
+    if not coreml:
         arr[:, :, 0] -= _R_MEAN
         arr[:, :, 1] -= _G_MEAN
         arr[:, :, 2] -= _B_MEAN
     return arr
 
 
+def central_crop_by_fraction(im, central_fraction):
+    w = im.size[0]
+    h = im.size[1]
+    return central_crop(im, w * central_fraction, h * central_fraction)
+
+
+def pre_process_mobilenet(im, coreml=False):
+    # 參考 https://github.com/tensorflow/models/blob/master/research/slim/preprocessing/inception_preprocessing.py
+    # 裡的 preprocess_for_eval
+    im1 = central_crop_by_fraction(im, 0.875)
+    target_smallest_size = 224
+    im2 = im1.resize((target_smallest_size, target_smallest_size),
+                     PIL.Image.BILINEAR)
+    arr = np.asarray(im2).astype(np.float32)
+    if not coreml:
+        arr /= 255.0
+        arr -= 0.5
+        arr *= 2.0
+    return arr
+
+
+def pre_process(im, coreml=False):
+    return {
+        'resnet_v2_50': pre_process_resnet,
+        'mobilenet_v1': pre_process_mobilenet,
+    }[model_name](im, coreml=coreml)
+
+
 def _inference_by_pb():
     # http://www.cnblogs.com/arkenstone/p/7551270.html
     filenames = [
         ('20180330/1lZsRrQzj/1lZsRrQzj_5.jpg', u'通泉草'),
-        ('20180330/4PdXwYcGt/4PdXwYcGt_5.jpg', u'酢漿草'),
+        ('20180330/iUTbDxEoT/iUTbDxEoT_0.jpg', u'杜鵑花仙子'),
+        # ('20180330/4PdXwYcGt/4PdXwYcGt_5.jpg', u'酢漿草'),
     ]
     for filename, label in filenames:
-        filename = os.path.join(DATASET_DIR, filename)
+        filename = dataset_dir_file(filename)
         # image_np = cv2.imread(filename)
         result = run_inference_on_file(filename)
         index = result['prediction_label']
@@ -295,6 +511,11 @@ def _inference_by_pb():
         print("Prediction name:", prediction_name)
         print("Top 3 Prediction label index:", ' '.join(result['top_n_names']))
         assert prediction_name == label
+
+
+def dataset_dir_file(filename):
+    filename = os.path.join(DATASET_DIR, filename)
+    return filename
 
 
 def run_inference_by_pb(image_np):
@@ -312,7 +533,9 @@ def run_inference_by_pb(image_np):
         graph = tf.import_graph_def(graph_def, name='')
         with tf.Session(graph=graph) as sess:
             input_tensor_name = "input:0"
-            output_tensor_name = "resnet_v2_50/predictions/Reshape_1:0"
+            # output_tensor_name = "resnet_v2_50/predictions/Reshape_1:0"
+            output_tensor_name = OUTPUT_MODEL_NODE_NAMES_DICT[
+                                     model_name] + ":0"
             input_tensor = sess.graph.get_tensor_by_name(
                 input_tensor_name)  # get input tensor
             output_tensor = sess.graph.get_tensor_by_name(
@@ -326,7 +549,8 @@ def _inference_by_coreml():
     labels_to_names = read_label_file(FLAGS.dataset_dir)
     filenames = [
         ('20180330/1lZsRrQzj/1lZsRrQzj_5.jpg', u'通泉草'),
-        ('20180330/4PdXwYcGt/4PdXwYcGt_5.jpg', u'酢漿草'),
+        ('20180330/iUTbDxEoT/iUTbDxEoT_0.jpg', u'杜鵑花仙子'),
+        # ('20180330/4PdXwYcGt/4PdXwYcGt_5.jpg', u'酢漿草'),
     ]
     for filename, label in filenames:
         filename = os.path.join(DATASET_DIR, filename)
@@ -348,33 +572,48 @@ def _inference_by_coreml():
 def run_inference_by_coreml(image_np):
     frozen_model_file = '%s/frozen_graph.pb' % MODEL_DIR
     coreml_model_file = '%s/plant.mlmodel' % MODEL_DIR
-    image_np = pre_process(image_np, shift=False)
-    image_size = 224
+    image_np = pre_process(image_np, coreml=True)
 
     image = Image.fromarray(image_np.astype('int8'), 'RGB')
     input_tensor_shapes = {
-        "input:0": [1, image_size, image_size, 3]}  # batch size is 1
-    output_tensor_names = ['resnet_v2_50/predictions/Reshape_1:0']
+        "input:0": [1, image_np.shape[0], image_np.shape[1],
+                    3]}  # batch size is 1
+    output_tensor_name = OUTPUT_MODEL_NODE_NAMES_DICT[model_name] + ":0"
 
     coreml_model = coremltools.models.MLModel(coreml_model_file)
 
     convert_model = False
+    # convert_model = True
     if convert_model:
+        extra_args = {
+            'resnet_v2_50': {
+                'red_bias': -_R_MEAN,
+                'green_bias': -_G_MEAN,
+                'blue_bias': -_B_MEAN,
+            },
+            'mobilenet_v1': {
+                'red_bias': -1.0,
+                'green_bias': -1.0,
+                'blue_bias': -1.0,
+                'image_scale': 2.0 / 255.,
+            }
+        }[model_name]
         coreml_model = tfcoreml.convert(
             tf_model_path=frozen_model_file,
             mlmodel_path=coreml_model_file.replace('.mlmodel',
                                                    '_test.mlmodel'),
             input_name_shape_dict=input_tensor_shapes,
-            output_feature_names=output_tensor_names,
+            output_feature_names=[output_tensor_name],
             image_input_names=['input:0'],
-            red_bias=-_R_MEAN,
-            green_bias=-_G_MEAN,
-            blue_bias=-_B_MEAN,
+            **extra_args
         )
 
     coreml_inputs = {'input__0': image}
     coreml_output = coreml_model.predict(coreml_inputs, useCPUOnly=False)
-    probs = coreml_output['resnet_v2_50__predictions__Reshape_1__0'].flatten()
+
+    # example output: 'resnet_v2_50__predictions__Reshape_1__0'
+    probs = coreml_output[
+        output_tensor_name.replace('/', '__').replace(':', '__')].flatten()
     return probs
 
 

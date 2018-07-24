@@ -37,6 +37,7 @@ import os
 import random
 import sys
 import io
+import re
 from collections import defaultdict
 
 import tensorflow as tf
@@ -45,6 +46,8 @@ from datasets import dataset_utils
 from datasets import plants
 
 SPLIT_NAME_TRAIN = 'train'
+SPLIT_NAME_VALIDATION = 'validation'
+CLASS_NAME_OTHERS = u'其他'  # 無法分類的類別要叫什麼名字，None的話就不特別分出這一類
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -158,8 +161,8 @@ def _get_filenames_and_classes(dataset_dir):
                 class_names.append(class_name)
                 filename_class_tuples.append((file_path, class_name))
 
-    class_names = list(set(class_names))
-    return filename_class_tuples, sorted(class_names)
+    class_names = normalize_class_names(class_names)
+    return filename_class_tuples, class_names
 
 
 def _get_dataset_filename(dataset_dir, split_name, shard_id):
@@ -178,7 +181,7 @@ def _convert_dataset(split_name, filenames, class_names_to_ids, dataset_dir):
         (integers).
       dataset_dir: The directory where the converted datasets are stored.
     """
-    assert split_name in [SPLIT_NAME_TRAIN, 'validation']
+    assert split_name in [SPLIT_NAME_TRAIN, SPLIT_NAME_VALIDATION]
 
     num_per_shard = int(math.ceil(len(filenames) / float(_NUM_SHARDS)))
 
@@ -237,7 +240,7 @@ def _clean_up_temporary_files(dataset_dir):
 
 
 def _dataset_exists(dataset_dir):
-    for split_name in [SPLIT_NAME_TRAIN, 'validation']:
+    for split_name in [SPLIT_NAME_TRAIN, SPLIT_NAME_VALIDATION]:
         for shard_id in range(_NUM_SHARDS):
             output_filename = _get_dataset_filename(
                 dataset_dir, split_name, shard_id)
@@ -249,8 +252,31 @@ def _dataset_exists(dataset_dir):
 def _write_dataset_info_file(dataset_info, dataset_dir,
                              filename=plants.DATASET_INFO_FILENAME):
     labels_filename = os.path.join(dataset_dir, filename)
-    with tf.gfile.Open(labels_filename, 'w') as f:
-        json.dump(dataset_info, f)
+    _save_as_json(labels_filename, dataset_info)
+
+
+def _save_as_json(filename, data):
+    with tf.gfile.Open(filename, 'w') as f:
+        json.dump(data, f)
+
+
+def save_filenames_by_split(dataset_dir, training_filename_pairs,
+                            validation_filename_pairs):
+    def get_filename(pair):
+        filename = pair[0]
+        if filename.startswith(dataset_dir):
+            filename = filename[len(dataset_dir):]
+        return filename
+
+    def get_filenames(pairs):
+        return [get_filename(p) for p in pairs]
+
+    dataset_dir = re.sub('/$', '', dataset_dir) + '/'
+    labels_filename = os.path.join(dataset_dir, 'filenames_by_split.json')
+    _save_as_json(labels_filename, {
+        SPLIT_NAME_TRAIN: get_filenames(training_filename_pairs),
+        SPLIT_NAME_VALIDATION: get_filenames(validation_filename_pairs),
+    })
 
 
 def run(dataset_dir):
@@ -271,26 +297,43 @@ def run(dataset_dir):
     class_names_to_ids = dict(zip(class_names, range(len(class_names))))
 
     # Divide into train and test:
-    training_filenames, validation_filenames = split_dataset_by_directory(
+    training_filename_pairs, validation_filename_pairs = split_dataset_by_directory(
         photo_filenames)
-    num_validation = len(validation_filenames)
+    save_filenames_by_split(dataset_dir, training_filename_pairs,
+                            validation_filename_pairs)
 
-    # First, convert the training and validation sets.
-    _convert_dataset(SPLIT_NAME_TRAIN, training_filenames, class_names_to_ids,
-                     dataset_dir)
-    _convert_dataset('validation', validation_filenames, class_names_to_ids,
-                     dataset_dir)
+    v_set = set([a[1] for a in validation_filename_pairs])
+    print(len(v_set))
+    # return
 
-    # Finally, write the labels file:
+    # Write the labels file:
     labels_to_class_names = dict(zip(range(len(class_names)), class_names))
     dataset_utils.write_label_file(labels_to_class_names, dataset_dir)
     _write_dataset_info_file({
-        SPLIT_NAME_TRAIN: len(photo_filenames) - num_validation,
-        'validation': num_validation,
+        SPLIT_NAME_TRAIN: len(training_filename_pairs),
+        SPLIT_NAME_VALIDATION: len(validation_filename_pairs),
     }, dataset_dir)
+
+    # Convert the training and validation sets.
+    _convert_dataset(SPLIT_NAME_TRAIN, training_filename_pairs,
+                     class_names_to_ids,
+                     dataset_dir)
+    _convert_dataset(SPLIT_NAME_VALIDATION, validation_filename_pairs,
+                     class_names_to_ids,
+                     dataset_dir)
 
     # _clean_up_temporary_files(dataset_dir)
     print('\nFinished converting the Plant dataset!')
+
+
+def normalize_class_names(class_names):
+    # 「其他」永遠定義為id = 0
+    if CLASS_NAME_OTHERS:
+        class_names = [c for c in class_names if c != CLASS_NAME_OTHERS]
+    class_names = sorted(list(set(class_names)))
+    if CLASS_NAME_OTHERS:
+        class_names = [CLASS_NAME_OTHERS] + class_names
+    return class_names
 
 
 def split_dataset(photo_filenames):
