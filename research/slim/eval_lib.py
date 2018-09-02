@@ -19,6 +19,9 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from itertools import groupby, cycle
+
+import json
 import subprocess
 import PIL
 import coremltools
@@ -34,10 +37,13 @@ from datasets import dataset_factory
 from keras.preprocessing.image import ImageDataGenerator
 from matplotlib.font_manager import FontManager
 from nets import nets_factory
+from operator import itemgetter
 from preprocessing import preprocessing_factory
 from datasets import dataset_utils
 from datasets.plants import read_label_file
 from nets import resnet_v2
+from sklearn.metrics import roc_curve, auc
+from sklearn.preprocessing import label_binarize
 from tensorflow.python.training import monitored_session
 import seaborn as sns
 import matplotlib
@@ -137,7 +143,8 @@ def inspect_tfrecords(tfrecords_filename):
     return examples
 
 
-def get_info(checkpoint_path=None):
+def get_info(checkpoint_path=None,
+             calculate_confusion_matrix=False):
     # if not FLAGS.dataset_dir:
     #   raise ValueError('You must supply the dataset directory with --dataset_dir')
 
@@ -217,9 +224,13 @@ def get_info(checkpoint_path=None):
         'Recall_5': slim.metrics.streaming_recall_at_k(
             logits, labels, 5),
     })
-    confusion_matrix = tf.confusion_matrix(labels=labels,
-                                           num_classes=num_classes,
-                                           predictions=predictions)
+
+    if calculate_confusion_matrix:
+        confusion_matrix = tf.confusion_matrix(labels=labels,
+                                               num_classes=num_classes,
+                                               predictions=predictions)
+    else:
+        confusion_matrix = None
 
     # Print the summaries to screen.
     for name, value in names_to_values.items():
@@ -241,6 +252,7 @@ def get_info(checkpoint_path=None):
 
     tf.logging.info('Evaluating %s' % checkpoint_path)
     labels_to_names = read_label_file(FLAGS.dataset_dir)
+    probabilities = tf.nn.softmax(logits)
     return {
         'labels_to_names': labels_to_names,
         'checkpoint_path': checkpoint_path,
@@ -253,6 +265,7 @@ def get_info(checkpoint_path=None):
         'network_fn': network_fn,
         'labels': labels,
         'logits': logits,
+        'probabilities': probabilities,
         'predictions': predictions,
         'confusion_matrix': confusion_matrix,
     }
@@ -333,17 +346,21 @@ def set_matplot_zh_font():
 
 
 def _run_info():
-    info = get_info()
+    calculate_confusion_matrix = False
+    info = get_info(calculate_confusion_matrix=calculate_confusion_matrix)
     checkpoint_path = info['checkpoint_path']
     checkpoint_dir_path = os.path.dirname(checkpoint_path)
     num_batches = info['num_batches']
     names_to_updates = info['names_to_updates']
     variables_to_restore = info['variables_to_restore']
+    labels_to_names = info['labels_to_names']
     feed_dict = {}
     y, _ = info['network_fn'](info['images'], reuse=True)
 
     all_predictions = []
     all_labels = []
+    all_logits = []
+    all_probabilities = []
     num_categories = len(info['labels_to_names'])
     all_confusion_matrix = None
 
@@ -365,7 +382,8 @@ def _run_info():
                        'labels',
                        'images',
                        # 'raw_images',
-                       # 'logits',
+                       'logits',
+                       'probabilities',
                        'predictions',
                        'confusion_matrix',
                    ]
@@ -385,30 +403,35 @@ def _run_info():
             labels = res['labels']
             # print(labels)
             # print(res.keys())
-            # predictions = res['predictions']
+            predictions = res['predictions']
+            probabilities = res['probabilities']
+            logits = res['logits']
             # print(predictions)
             print('len labels', len(labels))
-            # all_predictions.extend(predictions)
+            all_predictions.extend(predictions)
             all_labels.extend(labels)
+            all_logits.extend(logits)
+            all_probabilities.extend(probabilities)
             print('all_labels length', len(all_labels))
             print('all_labels unique length', len(set(all_labels)))
             # continue
 
             # print([x == y for x, y, in zip(predictions, labels)])
-            confusion_matrix = res['confusion_matrix']
-            print('confusion_matrix')
-            print(confusion_matrix)
-            if all_confusion_matrix is None:
-                all_confusion_matrix = np.matrix(confusion_matrix)
-            else:
-                all_confusion_matrix += np.matrix(confusion_matrix)
+            if calculate_confusion_matrix:
+                confusion_matrix = res['confusion_matrix']
+                print('confusion_matrix')
+                print(confusion_matrix)
+                if all_confusion_matrix is None:
+                    all_confusion_matrix = np.matrix(confusion_matrix)
+                else:
+                    all_confusion_matrix += np.matrix(confusion_matrix)
 
-            print('all_confusion_matrix')
-            print(all_confusion_matrix)
-            np.savetxt(confusion_matrix_txt, all_confusion_matrix,
-                       fmt='% 3d')
-            # if i > 0:
-            #     break
+                print('all_confusion_matrix')
+                print(all_confusion_matrix)
+                np.savetxt(confusion_matrix_txt, all_confusion_matrix,
+                           fmt='% 3d')
+                # if i > 0:
+                #     break
 
         from collections import Counter
         c = Counter(all_labels)
@@ -417,9 +440,123 @@ def _run_info():
             print(k, v)
 
         all_confusion_matrix = np.loadtxt(confusion_matrix_txt)
-        plot_confusion_matrix(all_confusion_matrix,
-                              labels_to_names=info['labels_to_names'],
-                              save_dir=checkpoint_dir_path)
+
+        info_file_path = os.path.join(checkpoint_dir_path, 'info.json')
+        with open(info_file_path, 'w') as f:
+            json.dump({
+                'labels': all_labels,
+                'predictions': all_predictions,
+                'probabilities': [l.tolist() for l in all_probabilities],
+                'logits': [l.tolist() for l in all_logits],
+                'confusion_matrix': all_confusion_matrix.tolist(),
+            }, f)
+
+        ranking = _get_accuracy_ranking(all_confusion_matrix, labels_to_names)
+        for name, accuracy_ in ranking:
+            print(name, accuracy_)
+
+            # plot_confusion_matrix(all_confusion_matrix,
+            #                       labels_to_names=labels_to_names,
+            #                       save_dir=checkpoint_dir_path)
+
+
+def _plot_roc(logits_list, labels, predictions, probabilities):
+    possible_labels = list(sorted(set(labels)))
+    y_binary = label_binarize(labels, classes=possible_labels)
+
+    output_matrix = np.array(probabilities)
+    y_score_matrix = output_matrix
+    y_score_matrix = np.where(
+        y_score_matrix == np.max(y_score_matrix, axis=1)[:, None],
+        y_score_matrix, 0)
+
+    tpr = {}
+    fpr = {}
+    roc_auc = {}
+    for i in range(len(possible_labels)):
+        y_scores = y_score_matrix[:, i]
+        fpr[i], tpr[i], _ = roc_curve(y_binary[:, i], y_scores)
+        roc_auc[i] = auc(fpr[i], tpr[i])
+
+    # 參考 http://scikit-learn.org/stable/auto_examples/model_selection/plot_roc.html
+
+    y_score_matrix_ravel = y_score_matrix.ravel()
+    i_positive = y_score_matrix_ravel != 0
+    fpr["highest_probability"], tpr[
+        "highest_probability"], micro_thresholds = roc_curve(
+        y_binary.ravel()[i_positive], y_score_matrix_ravel[i_positive])
+    roc_auc["highest_probability"] = auc(fpr["highest_probability"],
+                                         tpr["highest_probability"])
+
+    # Compute micro-average ROC curve and ROC area
+    fpr["micro"], tpr["micro"], micro_thresholds = roc_curve(
+        y_binary.ravel(), y_score_matrix.ravel())
+    roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
+
+    lw = 2
+    n_classes = len(possible_labels)
+    # Compute macro-average ROC curve and ROC area
+
+    # First aggregate all false positive rates
+    all_fpr = np.unique(np.concatenate([fpr[i] for i in range(n_classes)]))
+
+    # Then interpolate all ROC curves at this points
+    mean_tpr = np.zeros_like(all_fpr)
+    for i in range(n_classes):
+        mean_tpr += np.interp(all_fpr, fpr[i], tpr[i])
+
+    # Finally average it and compute AUC
+    mean_tpr /= n_classes
+
+    fpr["macro"] = all_fpr
+    tpr["macro"] = mean_tpr
+    roc_auc["macro"] = auc(fpr["macro"], tpr["macro"])
+
+    # key_series = 'micro'
+    key_series = 'highest_probability'
+    i_optimal_micro = np.argmax(tpr[key_series] - fpr[key_series])
+    optimal_threshold_fpr = fpr[key_series][i_optimal_micro]
+    optimal_threshold_tpr = tpr[key_series][i_optimal_micro]
+    optimal_threshold = micro_thresholds[i_optimal_micro]
+    print('optimal_threshold_fpr:', optimal_threshold_fpr)
+    print('optimal_threshold_tpr:', optimal_threshold_tpr)
+    print('optimal_threshold:', optimal_threshold)
+
+    # Plot all ROC curves
+    plt.figure()
+
+    colors = cycle(['aqua', 'darkorange', 'cornflowerblue'])
+
+    plt.plot(fpr["highest_probability"], tpr["highest_probability"],
+             label='ROC curve (area = {0:0.2f})'
+                   ''.format(roc_auc["highest_probability"]),
+             color='blue', linestyle=':', linewidth=4)
+
+    plt.plot([0, 1], [0, 1], 'k--', lw=lw)
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC curve')
+    plt.legend(loc="lower right")
+    plt.show()
+
+
+def _run_analysis():
+    checkpoint_dir_path = FLAGS.checkpoint_path
+    info_file_path = os.path.join(checkpoint_dir_path, 'info.json')
+    with open(info_file_path, 'r') as f:
+        info = json.load(f)
+
+    logits_list = info['logits']
+    labels = info['labels']
+    predictions = info['predictions']
+    probabilities = info['probabilities']
+
+    _plot_roc(logits_list, labels, predictions, probabilities)
+    return
+
+
 
 
 def inspect_datasets():
