@@ -201,6 +201,9 @@ def get_info(checkpoint_path=None,
         allow_smaller_final_batch=True,
         capacity=5 * FLAGS.batch_size)
 
+    one_hot_labels = slim.one_hot_encoding(
+        labels, dataset.num_classes - FLAGS.labels_offset)
+
     ####################
     # Define the model #
     ####################
@@ -253,6 +256,11 @@ def get_info(checkpoint_path=None,
     tf.logging.info('Evaluating %s' % checkpoint_path)
     labels_to_names = read_label_file(FLAGS.dataset_dir)
     probabilities = tf.nn.softmax(logits)
+    softmax_cross_entropy_loss = slim.losses.softmax_cross_entropy(
+        logits, one_hot_labels, label_smoothing=0.0, weights=1.0)
+    grad_imgs = tf.gradients(softmax_cross_entropy_loss,
+                             images)[:][0]
+
     return {
         'labels_to_names': labels_to_names,
         'checkpoint_path': checkpoint_path,
@@ -268,6 +276,8 @@ def get_info(checkpoint_path=None,
         'probabilities': probabilities,
         'predictions': predictions,
         'confusion_matrix': confusion_matrix,
+        'loss': softmax_cross_entropy_loss,
+        'grad_imgs': grad_imgs,
     }
 
 
@@ -345,6 +355,39 @@ def set_matplot_zh_font():
         plt.rcParams['axes.unicode_minus'] = False
 
 
+def deprocess_image(x, target_std=0.15):
+    epsilon = 1e-7
+    # normalize tensor: center on 0., ensure std is 0.1
+    x -= x.mean()
+    x /= (x.std() + epsilon)
+    x *= target_std
+
+    # clip to [0, 1]
+    # x += 0.5
+    x = np.clip(x, 0, 1)
+
+    # convert to RGB array
+    x *= 255
+    # if K.image_data_format() == 'channels_first':
+    #     x = x.transpose((1, 2, 0))
+    x = np.clip(x, 0, 255).astype('uint8')
+    return x
+
+
+def plot_silency(silency, image, file_name=None):
+    plt.figure(figsize=(15, 10))
+    plt.subplot(1, 2, 1)
+    plt.imshow(silency)
+    plt.subplot(1, 2, 2)
+    plt.imshow(image)
+    if file_name:
+        plt.savefig(file_name)
+        print(file_name, 'saved')
+    else:
+        print('plot shown')
+        plt.show()
+
+
 def _run_info():
     calculate_confusion_matrix = False
     info = get_info(calculate_confusion_matrix=calculate_confusion_matrix)
@@ -386,6 +429,8 @@ def _run_info():
                        'probabilities',
                        'predictions',
                        'confusion_matrix',
+                       # 'loss',
+                       'grad_imgs',
                    ]
             }
             # params.update(
@@ -399,6 +444,23 @@ def _run_info():
                 traceback.print_exc()
                 raise
                 # break
+
+            images = res['images']
+            grad_imgs = res['grad_imgs']
+
+            n = images.shape[0]
+            save_dir = 'silency_maps'
+            try:
+                os.makedirs(save_dir)
+            except OSError:
+                pass
+
+            for j in range(n):
+                image = images[j]
+                grad_img = grad_imgs[j]
+                file_name = '{}/{:03d}_{:03d}.jpg'.format(save_dir, i, j)
+                silency = deprocess_image(grad_img)
+                plot_silency(silency, image, file_name=file_name)
 
             labels = res['labels']
             # print(labels)
@@ -557,8 +619,6 @@ def _run_analysis():
     return
 
 
-
-
 def inspect_datasets():
     examples = []
     for i in range(5):
@@ -574,7 +634,6 @@ def inspect_datasets():
             'plants_train_{:05d}-of-00005.tfrecord'.format(i))
         examples.extend(inspect_tfrecords(tfrecords_filename))
     print(len(examples))
-
 
 
 def resize(im, target_smallest_size):
@@ -778,8 +837,9 @@ def run_inference_on_file(filename):
 
 
 def main(_):
-    _inference_by_pb()
-    _inference_by_coreml()
+    # _inference_by_pb()
+    # _inference_by_coreml()
+    _run_info()
 
 
 if __name__ == '__main__':
