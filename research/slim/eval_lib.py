@@ -448,19 +448,8 @@ def _run_info():
             images = res['images']
             grad_imgs = res['grad_imgs']
 
-            n = images.shape[0]
-            save_dir = 'saliency_maps'
-            try:
-                os.makedirs(save_dir)
-            except OSError:
-                pass
-
-            for j in range(n):
-                image = images[j]
-                grad_img = grad_imgs[j]
-                file_name = '{}/{:03d}_{:03d}.jpg'.format(save_dir, i, j)
-                saliency = deprocess_image(grad_img)
-                plot_saliency(saliency, image, file_name=file_name)
+            prefix = '{:03d}_'.format(i)
+            save_saliency_maps(grad_imgs, images, prefix)
 
             labels = res['labels']
             # print(labels)
@@ -520,6 +509,21 @@ def _run_info():
             # plot_confusion_matrix(all_confusion_matrix,
             #                       labels_to_names=labels_to_names,
             #                       save_dir=checkpoint_dir_path)
+
+
+def save_saliency_maps(grad_imgs, images, prefix=''):
+    n = images.shape[0]
+    save_dir = 'saliency_maps'
+    try:
+        os.makedirs(save_dir)
+    except OSError:
+        pass
+    for j in range(n):
+        image = images[j]
+        grad_img = grad_imgs[j]
+        file_name = '{}/{}{:03d}.jpg'.format(save_dir, prefix, j)
+        saliency = deprocess_image(grad_img)
+        plot_saliency(saliency, image, file_name=file_name)
 
 
 def _plot_roc(logits_list, labels, predictions, probabilities):
