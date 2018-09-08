@@ -19,6 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import h5py
 from itertools import groupby, cycle
 
 import json
@@ -201,9 +202,6 @@ def get_info(checkpoint_path=None,
         allow_smaller_final_batch=True,
         capacity=5 * FLAGS.batch_size)
 
-    one_hot_labels = slim.one_hot_encoding(
-        labels, dataset.num_classes - FLAGS.labels_offset)
-
     ####################
     # Define the model #
     ####################
@@ -219,6 +217,10 @@ def get_info(checkpoint_path=None,
         variables_to_restore = slim.get_variables_to_restore()
 
     predictions = tf.argmax(logits, 1)
+
+    one_hot_predictions = slim.one_hot_encoding(
+        predictions, dataset.num_classes - FLAGS.labels_offset)
+
     labels = tf.squeeze(labels)
 
     # Define the metrics:
@@ -257,9 +259,9 @@ def get_info(checkpoint_path=None,
     labels_to_names = read_label_file(FLAGS.dataset_dir)
     probabilities = tf.nn.softmax(logits)
     softmax_cross_entropy_loss = slim.losses.softmax_cross_entropy(
-        logits, one_hot_labels, label_smoothing=0.0, weights=1.0)
+        logits, one_hot_predictions, label_smoothing=0.0, weights=1.0)
     grad_imgs = tf.gradients(softmax_cross_entropy_loss,
-                             images)[:][0]
+                             images)[0]
 
     return {
         'labels_to_names': labels_to_names,
@@ -356,36 +358,46 @@ def set_matplot_zh_font():
 
 
 def deprocess_image(x, target_std=0.15):
-    epsilon = 1e-7
-    # normalize tensor: center on 0., ensure std is 0.1
+    # normalize tensor
+    x = np.abs(x)
+    x = np.max(x, axis=2)
+
     x -= x.mean()
-    x /= (x.std() + epsilon)
+    std = x.std()
+    if std:
+        x /= std
+
     x *= target_std
 
-    # clip to [0, 1]
-    # x += 0.5
-    x = np.clip(x, 0, 1)
-
-    # convert to RGB array
     x *= 255
-    # if K.image_data_format() == 'channels_first':
-    #     x = x.transpose((1, 2, 0))
     x = np.clip(x, 0, 255).astype('uint8')
     return x
 
 
-def plot_saliency(saliency, image, file_name=None):
+def plot_image_in_grids(image_list, n_columns, file_name=None):
+    image_table = chunks(image_list, n_columns)
+    n_row = len(image_table)
     plt.figure(figsize=(15, 10))
-    plt.subplot(1, 2, 1)
-    plt.imshow(saliency)
-    plt.subplot(1, 2, 2)
-    plt.imshow(image)
+    i = 1
+    for row in image_table:
+        for col in row:
+            plt.subplot(n_row, n_columns, i)
+            plt.imshow(col)
+            i += 1
+
     if file_name:
         plt.savefig(file_name)
         print(file_name, 'saved')
     else:
         print('plot shown')
         plt.show()
+
+
+def plot_saliency(saliency, image, file_name=None):
+    plt.figure(figsize=(15, 10))
+    plot_image_in_grids([
+        [saliency, image]
+    ], file_name)
 
 
 def _run_info():
@@ -490,25 +502,26 @@ def _run_info():
         for k, v in kv_pairs:
             print(k, v)
 
-        all_confusion_matrix = np.loadtxt(confusion_matrix_txt)
+def save_var(directory, file_name, info):
+    info_file_path = os.path.join(directory, file_name)
+    f = h5py.File(info_file_path, 'w')
+    for k, v in info.items():
+        f[k] = v
+    f.close()
+    print(info_file_path, 'saved')
 
-        info_file_path = os.path.join(checkpoint_dir_path, 'info.json')
-        with open(info_file_path, 'w') as f:
-            json.dump({
-                'labels': all_labels,
-                'predictions': all_predictions,
-                'probabilities': [l.tolist() for l in all_probabilities],
-                'logits': [l.tolist() for l in all_logits],
-                'confusion_matrix': all_confusion_matrix.tolist(),
-            }, f)
 
-        ranking = _get_accuracy_ranking(all_confusion_matrix, labels_to_names)
-        for name, accuracy_ in ranking:
-            print(name, accuracy_)
+def load_var(directory, file_name):
+    info_file_path = os.path.join(directory, file_name)
+    with h5py.File(info_file_path, 'r') as f:
+        return {
+            k: f[k][:] for k in f.keys()
+        }
 
-            # plot_confusion_matrix(all_confusion_matrix,
-            #                       labels_to_names=labels_to_names,
-            #                       save_dir=checkpoint_dir_path)
+
+def chunks(l, n):
+    """Yield successive n-sized chunks from l."""
+    return [l[i:i + n] for i in range(0, len(l), n)]
 
 
 def save_saliency_maps(grad_imgs, images, prefix=''):
@@ -522,8 +535,10 @@ def save_saliency_maps(grad_imgs, images, prefix=''):
         image = images[j]
         grad_img = grad_imgs[j]
         file_name = '{}/{}{:03d}.jpg'.format(save_dir, prefix, j)
-        saliency = deprocess_image(grad_img)
-        plot_saliency(saliency, image, file_name=file_name)
+        saliency = deprocess_image(grad_img, target_std=0.3)
+        plot_image_in_grids([
+            saliency, image
+        ], n_columns=2, file_name=file_name)
 
 
 def _plot_roc(logits_list, labels, predictions, probabilities):
