@@ -374,10 +374,10 @@ def deprocess_image(x, target_std=0.15):
     return x
 
 
-def plot_silency(silency, image, file_name=None):
+def plot_saliency(saliency, image, file_name=None):
     plt.figure(figsize=(15, 10))
     plt.subplot(1, 2, 1)
-    plt.imshow(silency)
+    plt.imshow(saliency)
     plt.subplot(1, 2, 2)
     plt.imshow(image)
     if file_name:
@@ -449,7 +449,7 @@ def _run_info():
             grad_imgs = res['grad_imgs']
 
             n = images.shape[0]
-            save_dir = 'silency_maps'
+            save_dir = 'saliency_maps'
             try:
                 os.makedirs(save_dir)
             except OSError:
@@ -459,8 +459,8 @@ def _run_info():
                 image = images[j]
                 grad_img = grad_imgs[j]
                 file_name = '{}/{:03d}_{:03d}.jpg'.format(save_dir, i, j)
-                silency = deprocess_image(grad_img)
-                plot_silency(silency, image, file_name=file_name)
+                saliency = deprocess_image(grad_img)
+                plot_saliency(saliency, image, file_name=file_name)
 
             labels = res['labels']
             # print(labels)
