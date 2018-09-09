@@ -502,6 +502,7 @@ def _run_info():
         for k, v in kv_pairs:
             print(k, v)
 
+
 def save_var(directory, file_name, info):
     info_file_path = os.path.join(directory, file_name)
     f = h5py.File(info_file_path, 'w')
@@ -733,31 +734,42 @@ def dataset_dir_file(filename):
     return filename
 
 
-def run_inference_by_pb(image_np):
-    pb_file_path = '%s/frozen_graph.pb' % MODEL_DIR
-    image_size = 224
+def run_inference_by_pb(image_np, pb_file_path=None):
+    pb_file_path = pb_file_path or '%s/frozen_graph.pb' % MODEL_DIR
 
+    with tf.gfile.GFile(pb_file_path) as f:
+        graph_def = tf.GraphDef()
+        graph_def.ParseFromString(f.read())
+
+        return _run_inference_by_graph_def(graph_def, image_np)
+
+
+def _run_inference_by_graph_def(graph_def, image_np):
+    image_size = 224
     image_np = pre_process(image_np)
     image_np = cv2.resize(image_np, (image_size, image_size))
     # expand dims to shape [None, 299, 299, 3]
     image_np = np.expand_dims(image_np, 0)
 
-    with tf.gfile.GFile(pb_file_path) as f:
-        graph_def = tf.GraphDef()
-        graph_def.ParseFromString(f.read())
-        graph = tf.import_graph_def(graph_def, name='')
-        with tf.Session(graph=graph) as sess:
-            input_tensor_name = "input:0"
-            # output_tensor_name = "resnet_v2_50/predictions/Reshape_1:0"
-            output_tensor_name = OUTPUT_MODEL_NODE_NAMES_DICT[
-                                     model_name] + ":0"
-            input_tensor = sess.graph.get_tensor_by_name(
-                input_tensor_name)  # get input tensor
-            output_tensor = sess.graph.get_tensor_by_name(
-                output_tensor_name)  # get output tensor
-            logits = sess.run(output_tensor,
-                              feed_dict={input_tensor: image_np})
-            return logits
+    graph = tf.import_graph_def(graph_def, name='')
+    with tf.Session(graph=graph) as sess:
+        input_tensor_name = "input:0"
+        # output_tensor_name = "resnet_v2_50/predictions/Reshape_1:0"
+        output_tensor_name = OUTPUT_MODEL_NODE_NAMES_DICT[
+                                 model_name] + ":0"
+        input_tensor = sess.graph.get_tensor_by_name(
+            input_tensor_name)  # get input tensor
+        output_tensor = sess.graph.get_tensor_by_name(
+            output_tensor_name)  # get output tensor
+        grad_imgs_tensor = sess.graph.get_tensor_by_name(
+            'gradients/MobilenetV1/MobilenetV1/Conv2d_0/Conv2D_grad/Conv2DBackpropInput:0')
+        logits, grad_imgs = sess.run([output_tensor, grad_imgs_tensor],
+                                     feed_dict={input_tensor: image_np})
+
+        return {
+            'logits': logits,
+            'grad_imgs': grad_imgs,
+        }
 
 
 def _inference_by_coreml():
@@ -853,6 +865,56 @@ def run_inference_on_file_pb(filename):
 
 def run_inference_on_file(filename):
     return run_inference_on_file_pb(filename)
+
+
+def get_image_with_saliency_map(image_np, saliency):
+    image_np = np.copy(np.asarray(image_np))[:, :]
+
+    w, h = image_np.shape[0:2]
+    l = min(w, h)
+    saliency = cv2.resize(saliency, (l, l))
+    saliency = cv2.cvtColor(saliency, cv2.COLOR_GRAY2RGB)
+
+    canvas = image_np[:, :]
+    w_offset = int((w - l) / 2)
+    h_offset = int((h - l) / 2)
+    roi_img = canvas[w_offset:w_offset + l, h_offset:h_offset + l]
+
+    intensify_factor = 3
+    alpha = np.clip(1 - intensify_factor * saliency.astype(float) / 255, 0, 1)
+
+    paint = np.copy(1 - alpha)
+    paint[:, :] *= np.array([255, 200, 0]).astype(float) / 255  # orange
+
+    roi_img = cv2.multiply(alpha, roi_img.astype(float))
+    roi_img = cv2.add(paint * (1 - alpha) * 255, roi_img).astype(int)
+    canvas[w_offset:w_offset + l, h_offset:h_offset + l] = roi_img
+    return canvas
+
+
+def test_frozen_graph_saliency_map(config):
+    checkpoint_dir = config['checkpoint_path']
+    frozen_graph_path = os.path.join(checkpoint_dir, 'frozen_graph.pb')
+
+    filename = dataset_dir_file('20180330/1lZsRrQzj/1lZsRrQzj_5.jpg')
+
+    labels_to_names = read_label_file(DATASET_DIR)
+    image_np = PIL.Image.open(filename)
+    results = run_inference_by_pb(image_np, pb_file_path=frozen_graph_path)
+    logits = results['logits']
+
+    index = np.argmax(logits, 1)[0]
+    prediction_name = labels_to_names[index]
+    grad_imgs = results['grad_imgs']
+
+    saliency = deprocess_image(grad_imgs[0])
+    blend = get_image_with_saliency_map(image_np, saliency)
+
+    print(prediction_name)
+    plot_image_in_grids([
+        blend, image_np,
+        saliency,
+    ], 2)
 
 
 def main(_):

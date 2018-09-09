@@ -27,7 +27,7 @@ VALIDATION_SET_NAME = 'validation'
 
 OUTPUT_MODEL_NODE_NAMES_DICT = {
     'resnet_v2_50': 'resnet_v2_50/predictions/Reshape_1',
-    'mobilenet_v1': 'MobilenetV1/Predictions/Reshape_1',
+    'mobilenet_v1': 'MobilenetV1/Predictions/Reshape_1,gradients/MobilenetV1/MobilenetV1/Conv2d_0/Conv2D_grad/Conv2DBackpropInput',
 }
 
 
@@ -331,16 +331,7 @@ def export_graph(config):
     inference_graph_path = os.path.join(checkpoint_dir, 'inference_graph.pb')
     frozen_graph_path = os.path.join(checkpoint_dir, 'frozen_graph.pb')
 
-    script_params = {
-        'alsologtostderr': True,
-        'model_name': model_name,
-        'dataset_name': 'plants',
-        'dataset_dir': dataset_dir,
-        'output_file': inference_graph_path,
-    }
-    run_command([
-        sys.executable, 'research/slim/export_inference_graph.py'
-    ], command_params_dict=script_params)
+    export_inference_graph(model_name, dataset_dir, inference_graph_path)
 
     run_command([
         sys.executable, freeze_graph_script_path
@@ -353,6 +344,46 @@ def export_graph(config):
     })
 
     return frozen_graph_path
+
+
+def export_inference_graph(model_name, dataset_dir, output_file):
+    # adapted from research/slim/export_inference_graph.py
+    dataset_name = 'plants'
+    labels_offset = 0
+    is_training = False
+    image_size = None
+    batch_size = None
+
+    from tensorflow.python.platform import gfile
+    from datasets import dataset_factory
+    from nets import nets_factory
+    slim = tf.contrib.slim
+
+    with tf.Graph().as_default() as graph:
+        dataset = dataset_factory.get_dataset(dataset_name, 'train',
+                                              dataset_dir)
+        network_fn = nets_factory.get_network_fn(
+            model_name,
+            num_classes=(dataset.num_classes - labels_offset),
+            is_training=is_training)
+        image_size = image_size or network_fn.default_image_size
+        placeholder = tf.placeholder(name='input', dtype=tf.float32,
+                                     shape=[batch_size, image_size,
+                                            image_size, 3])
+        logits, _ = network_fn(placeholder)
+        predictions = tf.argmax(logits, 1)
+
+        one_hot_predictions = slim.one_hot_encoding(
+            predictions, dataset.num_classes - labels_offset)
+
+        softmax_cross_entropy_loss = slim.losses.softmax_cross_entropy(
+            logits, one_hot_predictions, label_smoothing=0.0, weights=1.0)
+        grad_imgs = tf.gradients(softmax_cross_entropy_loss,
+                                 placeholder)[0]
+
+        graph_def = graph.as_graph_def()
+        with gfile.GFile(output_file, 'wb') as f:
+            f.write(graph_def.SerializeToString())
 
 
 def export_coreml(config, frozen_graph_path):
@@ -485,6 +516,8 @@ def main(config_file, export_models, show_plot, export_plot):
         frozen_graph_path = export_graph(config)
         export_coreml(config, frozen_graph_path)
         export_tflite(config, frozen_graph_path)
+        from eval_lib import test_frozen_graph_saliency_map
+        test_frozen_graph_saliency_map(config)
 
 
 if __name__ == '__main__':
