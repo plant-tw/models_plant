@@ -542,8 +542,9 @@ def save_saliency_maps(grad_imgs, images, prefix=''):
         ], n_columns=2, file_name=file_name)
 
 
-def _plot_roc(logits_list, labels, predictions, probabilities):
-    possible_labels = list(sorted(set(labels)))
+def _plot_roc(logits_list, labels, predictions, probabilities,
+              plot_all_classes=False, save_dir=None):
+    possible_labels = list(range(max(labels) + 1))
     y_binary = label_binarize(labels, classes=possible_labels)
 
     output_matrix = np.array(probabilities)
@@ -608,19 +609,27 @@ def _plot_roc(logits_list, labels, predictions, probabilities):
     plt.figure()
 
     colors = cycle(['aqua', 'darkorange', 'cornflowerblue'])
+    if plot_all_classes:
+        for i, color in zip(range(n_classes), colors):
+            label = 'ROC curve of class {0} (area = {1:0.2f})'.format(
+                i, roc_auc[i])
+            label = None
+            plt.plot(fpr[i], tpr[i], color=color, lw=lw,
+                     label=label)
 
     plt.plot(fpr["highest_probability"], tpr["highest_probability"],
              label='ROC curve (area = {0:0.2f})'
                    ''.format(roc_auc["highest_probability"]),
              color='blue', linestyle=':', linewidth=4)
 
-    plt.plot([0, 1], [0, 1], 'k--', lw=lw)
+    # plt.plot([0, 1], [0, 1], 'k--', lw=lw)
     plt.xlim([0.0, 1.0])
     plt.ylim([0.0, 1.05])
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
     plt.title('ROC curve')
     plt.legend(loc="lower right")
+    plt.savefig(os.path.join(save_dir, 'roc_curve.png'))
     plt.show()
 
 
@@ -635,7 +644,8 @@ def _run_analysis():
     predictions = info['predictions']
     probabilities = info['probabilities']
 
-    _plot_roc(logits_list, labels, predictions, probabilities)
+    _plot_roc(logits_list, labels, predictions, probabilities,
+              save_dir=checkpoint_dir_path)
     return
 
 
