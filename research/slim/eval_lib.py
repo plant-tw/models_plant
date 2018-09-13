@@ -19,6 +19,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from collections import Iterable
+
 import h5py
 from itertools import groupby, cycle
 
@@ -65,8 +67,9 @@ OUTPUT_MODEL_NODE_NAMES_DICT = {
     'mobilenet_v1': 'MobilenetV1/Predictions/Reshape_1',
 }
 
+BATCH_SIZE = 100
 tf.app.flags.DEFINE_integer(
-    'batch_size', 100, 'The number of samples in each batch.')
+    'batch_size', BATCH_SIZE, 'The number of samples in each batch.')
 
 tf.app.flags.DEFINE_integer(
     'max_num_batches', None,
@@ -251,15 +254,13 @@ def get_info(checkpoint_path=None,
         # This ensures that we make a single pass over all of the data.
         num_batches = math.ceil(dataset.num_samples / float(FLAGS.batch_size))
 
-    checkpoint_path = checkpoint_path or FLAGS.checkpoint_path
-    if tf.gfile.IsDirectory(checkpoint_path):
-        checkpoint_path = tf.train.latest_checkpoint(checkpoint_path)
+    checkpoint_path = checkpoint_path or get_lastest_check_point()
 
     tf.logging.info('Evaluating %s' % checkpoint_path)
     labels_to_names = read_label_file(FLAGS.dataset_dir)
     probabilities = tf.nn.softmax(logits)
-    softmax_cross_entropy_loss = slim.losses.softmax_cross_entropy(
-        logits, one_hot_predictions, label_smoothing=0.0, weights=1.0)
+    softmax_cross_entropy_loss = tf.losses.softmax_cross_entropy(
+        one_hot_predictions, logits, label_smoothing=0.0, weights=1.0)
     grad_imgs = tf.gradients(softmax_cross_entropy_loss,
                              images)[0]
 
@@ -281,6 +282,13 @@ def get_info(checkpoint_path=None,
         'loss': softmax_cross_entropy_loss,
         'grad_imgs': grad_imgs,
     }
+
+
+def get_lastest_check_point():
+    checkpoint_path = FLAGS.checkpoint_path
+    if tf.gfile.IsDirectory(checkpoint_path):
+        checkpoint_path = tf.train.latest_checkpoint(checkpoint_path)
+    return checkpoint_path
 
 
 def get_monitored_session(checkpoint_path):
@@ -400,107 +408,90 @@ def plot_saliency(saliency, image, file_name=None):
     ], file_name)
 
 
-def _run_info():
-    calculate_confusion_matrix = False
+def _eval_tensors(checkpoint_path=None, keys=None):
+    calculate_confusion_matrix = True
     info = get_info(calculate_confusion_matrix=calculate_confusion_matrix)
-    checkpoint_path = info['checkpoint_path']
-    checkpoint_dir_path = os.path.dirname(checkpoint_path)
     num_batches = info['num_batches']
-    names_to_updates = info['names_to_updates']
-    variables_to_restore = info['variables_to_restore']
-    labels_to_names = info['labels_to_names']
-    feed_dict = {}
-    y, _ = info['network_fn'](info['images'], reuse=True)
+    aggregated = {}
 
-    all_predictions = []
-    all_labels = []
-    all_logits = []
-    all_probabilities = []
-    num_categories = len(info['labels_to_names'])
-    all_confusion_matrix = None
-
-    # all_confusion_matrix = np.loadtxt('confusion_matrix.txt')
-    # plot_confusion_matrix(all_confusion_matrix,
-    #                       labels_to_names=info['labels_to_names'])
-    # return
-    confusion_matrix_txt = os.path.join(checkpoint_dir_path,
-                                        'confusion_matrix.txt')
+    checkpoint_path = checkpoint_path or get_lastest_check_point()
     with get_monitored_session(checkpoint_path) as sess:
         for i in range(int(math.ceil(num_batches))):
-            # break
             print('batch #{} of {}'.format(i, num_batches))
             params = {
                 k: v
                 for k, v in info.items()
-                if isinstance(v, tf.Tensor)
-                   and k in [
-                       'labels',
-                       'images',
-                       # 'raw_images',
-                       'logits',
-                       'probabilities',
-                       'predictions',
-                       'confusion_matrix',
-                       # 'loss',
-                       'grad_imgs',
-                   ]
+                if isinstance(v, tf.Tensor) and (not keys or k in keys)
             }
-            # params.update(
-            #     y=y,
-            # )
-            # params = {'labels': info['labels']}
             try:
+                feed_dict = {}
                 res = sess.run(params, feed_dict=feed_dict)
             except:
                 import traceback
                 traceback.print_exc()
                 raise
-                # break
 
-            images = res['images']
-            grad_imgs = res['grad_imgs']
+            for k in res.keys():
+                value = res[k]
+                if k == 'confusion_matrix':
+                    if k not in aggregated:
+                        aggregated[k] = np.matrix(value)
+                    else:
+                        aggregated[k] += np.matrix(value)
+                else:
+                    if k not in aggregated:
+                        aggregated[k] = []
 
-            prefix = '{:03d}_'.format(i)
-            save_saliency_maps(grad_imgs, images, prefix)
+                    if isinstance(value, Iterable):
+                        aggregated[k].extend(value)
+                    else:
+                        aggregated[k].append(value)
 
             labels = res['labels']
-            # print(labels)
-            # print(res.keys())
-            predictions = res['predictions']
-            probabilities = res['probabilities']
-            logits = res['logits']
-            # print(predictions)
             print('len labels', len(labels))
-            all_predictions.extend(predictions)
-            all_labels.extend(labels)
-            all_logits.extend(logits)
-            all_probabilities.extend(probabilities)
+            all_labels = aggregated['labels']
             print('all_labels length', len(all_labels))
             print('all_labels unique length', len(set(all_labels)))
-            # continue
 
-            # print([x == y for x, y, in zip(predictions, labels)])
-            if calculate_confusion_matrix:
-                confusion_matrix = res['confusion_matrix']
-                print('confusion_matrix')
-                print(confusion_matrix)
-                if all_confusion_matrix is None:
-                    all_confusion_matrix = np.matrix(confusion_matrix)
-                else:
-                    all_confusion_matrix += np.matrix(confusion_matrix)
+    return aggregated
 
-                print('all_confusion_matrix')
-                print(all_confusion_matrix)
-                np.savetxt(confusion_matrix_txt, all_confusion_matrix,
-                           fmt='% 3d')
-                # if i > 0:
-                #     break
 
-        from collections import Counter
-        c = Counter(all_labels)
-        kv_pairs = sorted(dict(c).items(), key=lambda p: p[0])
-        for k, v in kv_pairs:
-            print(k, v)
+def _run_info(use_cached=False):
+    checkpoint_path = get_lastest_check_point()
+    checkpoint_dir_path = os.path.dirname(checkpoint_path)
+
+    aggregated = None
+    if use_cached:
+        aggregated = load_var(checkpoint_dir_path, 'run_info_result.h5')
+
+    if aggregated is None:
+        keys = [
+            'labels',
+            'images',
+            # 'raw_images',
+            'logits',
+            'probabilities',
+            'predictions',
+            'confusion_matrix',
+            # 'loss',
+            'grad_imgs',
+        ]
+        aggregated = _eval_tensors(keys=keys)
+
+        if use_cached:
+            save_var(checkpoint_dir_path, 'run_info_result.h5', aggregated)
+
+    grad_imgs = aggregated['grad_imgs']
+    images = aggregated['images']
+    prefix = '{:03d}_'.format(0)
+    save_saliency_maps(grad_imgs, images, prefix)
+
+    from collections import Counter
+    all_labels = aggregated['labels']
+    c = Counter(all_labels)
+    kv_pairs = sorted(dict(c).items(), key=lambda p: p[0])
+    for k, v in kv_pairs:
+        print(k, v)
 
 
 def save_var(directory, file_name, info):
@@ -514,10 +505,13 @@ def save_var(directory, file_name, info):
 
 def load_var(directory, file_name):
     info_file_path = os.path.join(directory, file_name)
-    with h5py.File(info_file_path, 'r') as f:
-        return {
-            k: f[k][:] for k in f.keys()
-        }
+    try:
+        with h5py.File(info_file_path, 'r') as f:
+            return {
+                k: f[k][:] for k in f.keys()
+            }
+    except IOError:
+        return None
 
 
 def chunks(l, n):
@@ -635,9 +629,7 @@ def _plot_roc(logits_list, labels, predictions, probabilities,
 
 def _run_analysis():
     checkpoint_dir_path = FLAGS.checkpoint_path
-    info_file_path = os.path.join(checkpoint_dir_path, 'info.json')
-    with open(info_file_path, 'r') as f:
-        info = json.load(f)
+    info = load_var(checkpoint_dir_path, 'run_info_result.h5')
 
     logits_list = info['logits']
     labels = info['labels']
@@ -930,7 +922,8 @@ def test_frozen_graph_saliency_map(config):
 def main(_):
     # _inference_by_pb()
     # _inference_by_coreml()
-    _run_info()
+    use_cached = True
+    _run_info(use_cached=use_cached)
 
 
 if __name__ == '__main__':
