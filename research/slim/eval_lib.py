@@ -19,36 +19,29 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import click
+import yaml
 from collections import Iterable, defaultdict
 
-import h5py
-from itertools import groupby, cycle
+from itertools import cycle
 
-import json
 import subprocess
 import PIL
-import coremltools
 import math
 import os
-import tensorflow as tf
-import tfcoreml
 from PIL import Image
 import cv2
 import numpy as np
 
-from datasets import dataset_factory
-from keras.preprocessing.image import ImageDataGenerator
-from matplotlib.font_manager import FontManager
-from nets import nets_factory
-from operator import itemgetter
-from preprocessing import preprocessing_factory
-from datasets import dataset_utils
-from datasets.plants import read_label_file
-from nets import resnet_v2
-from sklearn.metrics import roc_curve, auc
-from sklearn.preprocessing import label_binarize
+import tensorflow as tf
 from tensorflow.python.training import monitored_session
-import seaborn as sns
+
+from datasets.plants import read_label_file
+from datasets import dataset_factory
+from nets import nets_factory
+from preprocessing import preprocessing_factory
+
+from matplotlib.font_manager import FontManager
 import matplotlib
 
 if os.environ.get('DISPLAY', '') == '':
@@ -67,71 +60,74 @@ OUTPUT_MODEL_NODE_NAMES_DICT = {
     'mobilenet_v1': 'MobilenetV1/Predictions/Reshape_1',
 }
 
-BATCH_SIZE = 100
-tf.app.flags.DEFINE_integer(
-    'batch_size', BATCH_SIZE, 'The number of samples in each batch.')
 
-tf.app.flags.DEFINE_integer(
-    'max_num_batches', None,
-    'Max number of batches to evaluate by default use all.')
+def define_tf_flags():
+    BATCH_SIZE = 100
+    tf.app.flags.DEFINE_integer(
+        'batch_size', BATCH_SIZE, 'The number of samples in each batch.')
+    tf.app.flags.DEFINE_integer(
+        'max_num_batches', None,
+        'Max number of batches to evaluate by default use all.')
+    tf.app.flags.DEFINE_string(
+        'master', '', 'The address of the TensorFlow master to use.')
+    tf.app.flags.DEFINE_string(
+        'checkpoint_path', None,
+        'The directory where the model was written to or an absolute path to a '
+        'checkpoint file.')
+    tf.app.flags.DEFINE_string(
+        'eval_dir', '/tmp/tfmodel/',
+        'Directory where the results are saved to.')
+    tf.app.flags.DEFINE_integer(
+        'num_preprocessing_threads', 4,
+        'The number of threads used to create the batches.')
+    tf.app.flags.DEFINE_string(
+        'dataset_name', 'plants', 'The name of the dataset to load.')
+    tf.app.flags.DEFINE_string(
+        'dataset_split_name', 'validation',
+        'The name of the train/test split.')
+    tf.app.flags.DEFINE_string(
+        'dataset_dir', None,
+        'The directory where the dataset files are stored.')
+    tf.app.flags.DEFINE_integer(
+        'labels_offset', 0,
+        'An offset for the labels in the dataset. This flag is primarily used to '
+        'evaluate the VGG and ResNet architectures which do not use a background '
+        'class for the ImageNet dataset.')
+    tf.app.flags.DEFINE_string(
+        'model_name', 'mobilenet_v1',
+        'The name of the architecture to evaluate.')
+    tf.app.flags.DEFINE_string(
+        'preprocessing_name', None,
+        'The name of the preprocessing to use. If left '
+        'as `None`, then the model_name flag is used.')
+    tf.app.flags.DEFINE_float(
+        'moving_average_decay', None,
+        'The decay to use for the moving average.'
+        'If left as None, then moving averages are not used.')
+    tf.app.flags.DEFINE_integer(
+        'eval_image_size', None, 'Eval image size')
 
-tf.app.flags.DEFINE_string(
-    'master', '', 'The address of the TensorFlow master to use.')
-
-CHECKPOINT_PATH = '/tmp/tfmodel/'
-# CHECKPONT_PATH = 'resnet_v2_50_plants_non_exif'
-# CHECKPONT_PATH = 'resnet_v2_50_plants_0426'
-CHECKPOINT_PATH = 'resnet_v2_50_plants_0617'
-CHECKPOINT_PATH = 'experiments/mobilenet_v1_plants_0620'
-MODEL_DIR = os.environ.get('MODEL_DIR') or CHECKPOINT_PATH
-tf.app.flags.DEFINE_string(
-    'checkpoint_path', CHECKPOINT_PATH,
-    'The directory where the model was written to or an absolute path to a '
-    'checkpoint file.')
-
-tf.app.flags.DEFINE_string(
-    'eval_dir', '/tmp/tfmodel/', 'Directory where the results are saved to.')
-
-tf.app.flags.DEFINE_integer(
-    'num_preprocessing_threads', 4,
-    'The number of threads used to create the batches.')
-
-tf.app.flags.DEFINE_string(
-    'dataset_name', 'plants', 'The name of the dataset to load.')
-
-tf.app.flags.DEFINE_string(
-    'dataset_split_name', 'validation', 'The name of the train/test split.')
-
-DATASET_DIR = '/projects/private/plant/data_non_exif'
-tf.app.flags.DEFINE_string(
-    'dataset_dir', DATASET_DIR,
-    'The directory where the dataset files are stored.')
-
-tf.app.flags.DEFINE_integer(
-    'labels_offset', 0,
-    'An offset for the labels in the dataset. This flag is primarily used to '
-    'evaluate the VGG and ResNet architectures which do not use a background '
-    'class for the ImageNet dataset.')
-
-# model_name = 'resnet_v2_50'
-model_name = 'mobilenet_v1'
-tf.app.flags.DEFINE_string(
-    'model_name', model_name, 'The name of the architecture to evaluate.')
-
-tf.app.flags.DEFINE_string(
-    'preprocessing_name', None,
-    'The name of the preprocessing to use. If left '
-    'as `None`, then the model_name flag is used.')
-
-tf.app.flags.DEFINE_float(
-    'moving_average_decay', None,
-    'The decay to use for the moving average.'
-    'If left as None, then moving averages are not used.')
-
-tf.app.flags.DEFINE_integer(
-    'eval_image_size', None, 'Eval image size')
 
 FLAGS = tf.app.flags.FLAGS
+
+
+def get_dataset_dir(config):
+    return get_config_value(config, 'dataset_dir')
+
+
+def get_config_value(config, key):
+    return config.get(key) or getattr(FLAGS, key)
+
+
+def get_checkpoint_dir_path(config):
+    return get_config_value(config, 'checkpoint_path')
+
+
+def get_lastest_check_point(config):
+    checkpoint_path = get_checkpoint_dir_path(config)
+    if tf.gfile.IsDirectory(checkpoint_path):
+        checkpoint_path = tf.train.latest_checkpoint(checkpoint_path)
+    return checkpoint_path
 
 
 def inspect_tfrecords(tfrecords_filename):
@@ -147,10 +143,10 @@ def inspect_tfrecords(tfrecords_filename):
     return examples
 
 
-def get_info(checkpoint_path=None,
+def get_info(config, checkpoint_path=None,
              calculate_confusion_matrix=False):
-    # if not FLAGS.dataset_dir:
-    #   raise ValueError('You must supply the dataset directory with --dataset_dir')
+    dataset_dir = get_dataset_dir(config)
+    model_name = get_model_name(config)
 
     # tf.logging.set_verbosity(tf.logging.INFO)
     tf.Graph().as_default()
@@ -160,14 +156,14 @@ def get_info(checkpoint_path=None,
     # Select the dataset #
     ######################
     dataset = dataset_factory.get_dataset(
-        FLAGS.dataset_name, FLAGS.dataset_split_name, FLAGS.dataset_dir)
+        FLAGS.dataset_name, FLAGS.dataset_split_name, dataset_dir)
 
     ####################
     # Select the model #
     ####################
     num_classes = (dataset.num_classes - FLAGS.labels_offset)
     network_fn = nets_factory.get_network_fn(
-        FLAGS.model_name,
+        model_name,
         num_classes=num_classes,
         is_training=False)
 
@@ -189,7 +185,7 @@ def get_info(checkpoint_path=None,
     #####################################
     # Select the preprocessing function #
     #####################################
-    preprocessing_name = FLAGS.preprocessing_name or FLAGS.model_name
+    preprocessing_name = FLAGS.preprocessing_name or model_name
     image_preprocessing_fn = preprocessing_factory.get_preprocessing(
         preprocessing_name,
         is_training=False)
@@ -254,10 +250,10 @@ def get_info(checkpoint_path=None,
         # This ensures that we make a single pass over all of the data.
         num_batches = math.ceil(dataset.num_samples / float(FLAGS.batch_size))
 
-    checkpoint_path = checkpoint_path or get_lastest_check_point()
+    checkpoint_path = checkpoint_path or get_lastest_check_point(config)
 
     tf.logging.info('Evaluating %s' % checkpoint_path)
-    labels_to_names = read_label_file(FLAGS.dataset_dir)
+    labels_to_names = read_label_file(dataset_dir)
     probabilities = tf.nn.softmax(logits)
     softmax_cross_entropy_loss = tf.losses.softmax_cross_entropy(
         one_hot_predictions, logits, label_smoothing=0.0, weights=1.0)
@@ -284,13 +280,6 @@ def get_info(checkpoint_path=None,
     }
 
 
-def get_lastest_check_point():
-    checkpoint_path = FLAGS.checkpoint_path
-    if tf.gfile.IsDirectory(checkpoint_path):
-        checkpoint_path = tf.train.latest_checkpoint(checkpoint_path)
-    return checkpoint_path
-
-
 def get_monitored_session(checkpoint_path):
     session_creator = monitored_session.ChiefSessionCreator(
         checkpoint_filename_with_path=checkpoint_path,
@@ -304,6 +293,7 @@ def get_monitored_session(checkpoint_path):
 
 def plot_confusion_matrix(confusion_matrix, labels_to_names=None,
                           save_dir='.'):
+    import seaborn as sns
     set_matplot_zh_font()
     # ax = plt.subplot()
     fig, ax = plt.subplots()
@@ -340,7 +330,9 @@ def plot_confusion_matrix(confusion_matrix, labels_to_names=None,
     ax.xaxis.set_ticklabels(axis, rotation=270)
     ax.yaxis.set_ticklabels(axis, rotation=0)
 
-    plt.savefig(os.path.join(save_dir, 'confusion_matrix.png'))
+    pic_path = os.path.join(save_dir, 'confusion_matrix.png')
+    plt.savefig(pic_path)
+    print(pic_path, 'saved')
     print('plot shown')
     plt.show()
 
@@ -408,13 +400,21 @@ def plot_saliency(saliency, image, file_name=None):
     ], file_name)
 
 
-def _eval_tensors(checkpoint_path=None, keys=None):
+def _eval_tensors(config, checkpoint_path=None, keys=None, use_cached=False):
+    checkpoint_dir_path = get_checkpoint_dir_path(config)
+    if use_cached:
+        aggregated = load_var(checkpoint_dir_path, 'run_info_result.h5')
+
+        if aggregated is not None:
+            return aggregated
+
     calculate_confusion_matrix = True
-    info = get_info(calculate_confusion_matrix=calculate_confusion_matrix)
+    info = get_info(config,
+                    calculate_confusion_matrix=calculate_confusion_matrix)
     num_batches = info['num_batches']
     aggregated = {}
 
-    checkpoint_path = checkpoint_path or get_lastest_check_point()
+    checkpoint_path = checkpoint_path or get_lastest_check_point(config)
     with get_monitored_session(checkpoint_path) as sess:
         for i in range(int(math.ceil(num_batches))):
             print('batch #{} of {}'.format(i, num_batches))
@@ -453,38 +453,44 @@ def _eval_tensors(checkpoint_path=None, keys=None):
             print('all_labels length', len(all_labels))
             print('all_labels unique length', len(set(all_labels)))
 
+    if use_cached:
+        save_var(checkpoint_dir_path, 'run_info_result.h5', aggregated)
+
     return aggregated
 
 
-def _run_info(use_cached=False):
-    checkpoint_path = get_lastest_check_point()
-    checkpoint_dir_path = os.path.dirname(checkpoint_path)
+def _run_saliency_maps(config, use_cached=False):
+    checkpoint_path = get_lastest_check_point(config)
 
-    aggregated = None
-    if use_cached:
-        aggregated = load_var(checkpoint_dir_path, 'run_info_result.h5')
-
-    if aggregated is None:
-        keys = [
-            'labels',
-            'images',
-            # 'raw_images',
-            'logits',
-            'probabilities',
-            'predictions',
-            'confusion_matrix',
-            # 'loss',
-            'grad_imgs',
-        ]
-        aggregated = _eval_tensors(keys=keys)
-
-        if use_cached:
-            save_var(checkpoint_dir_path, 'run_info_result.h5', aggregated)
+    keys = [
+        'labels',
+        'images',
+        'grad_imgs',
+    ]
+    aggregated = _eval_tensors(config, keys=keys, use_cached=use_cached)
 
     grad_imgs = aggregated['grad_imgs']
     images = aggregated['images']
     prefix = ''
-    save_saliency_maps(grad_imgs, images, prefix, labels=aggregated['labels'])
+    save_saliency_maps(config, grad_imgs, images, prefix,
+                       labels=aggregated['labels'])
+
+
+def _run_info(config, use_cached=False):
+    checkpoint_path = get_lastest_check_point(config)
+
+    keys = [
+        'labels',
+        'images',
+        # 'raw_images',
+        'logits',
+        'probabilities',
+        'predictions',
+        'confusion_matrix',
+        # 'loss',
+        'grad_imgs',
+    ]
+    aggregated = _eval_tensors(config, keys=keys, use_cached=use_cached)
 
     from collections import Counter
     all_labels = aggregated['labels']
@@ -495,6 +501,7 @@ def _run_info(use_cached=False):
 
 
 def save_var(directory, file_name, info):
+    import h5py
     info_file_path = os.path.join(directory, file_name)
     f = h5py.File(info_file_path, 'w')
     for k, v in info.items():
@@ -504,6 +511,7 @@ def save_var(directory, file_name, info):
 
 
 def load_var(directory, file_name):
+    import h5py
     info_file_path = os.path.join(directory, file_name)
     try:
         with h5py.File(info_file_path, 'r') as f:
@@ -519,10 +527,10 @@ def chunks(l, n):
     return [l[i:i + n] for i in range(0, len(l), n)]
 
 
-def save_saliency_maps(grad_imgs, images, prefix='', labels=None):
+def save_saliency_maps(config, grad_imgs, images, prefix='', labels=None):
     n = images.shape[0]
     save_dir = 'saliency_maps'
-    labels_to_names = read_label_file(FLAGS.dataset_dir)
+    labels_to_names = read_label_file(get_dataset_dir(config))
 
     label_count_map = defaultdict(int)
     try:
@@ -558,6 +566,8 @@ def save_saliency_maps(grad_imgs, images, prefix='', labels=None):
 
 def _plot_roc(logits_list, labels, predictions, probabilities,
               plot_all_classes=False, save_dir=None):
+    from sklearn.metrics import roc_curve, auc
+    from sklearn.preprocessing import label_binarize
     possible_labels = list(range(max(labels) + 1))
     y_binary = label_binarize(labels, classes=possible_labels)
 
@@ -643,13 +653,22 @@ def _plot_roc(logits_list, labels, predictions, probabilities,
     plt.ylabel('True Positive Rate')
     plt.title('ROC curve')
     plt.legend(loc="lower right")
-    plt.savefig(os.path.join(save_dir, 'roc_curve.png'))
+    pic_path = os.path.join(save_dir, 'roc_curve.png')
+    plt.savefig(pic_path)
+    print(pic_path, 'saved')
+    print('ROC curve shown')
     plt.show()
 
 
-def _run_analysis():
-    checkpoint_dir_path = FLAGS.checkpoint_path
-    info = load_var(checkpoint_dir_path, 'run_info_result.h5')
+def _roc_analysis(config, use_cached=False):
+    checkpoint_dir_path = get_checkpoint_dir_path(config)
+    keys = [
+        'logits',
+        'labels',
+        'predictions',
+        'probabilities',
+    ]
+    info = _eval_tensors(config, keys=keys, use_cached=use_cached)
 
     logits_list = info['logits']
     labels = info['labels']
@@ -661,18 +680,19 @@ def _run_analysis():
     return
 
 
-def inspect_datasets():
+def inspect_datasets(config):
+    dataset_dir = get_dataset_dir(config)
     examples = []
     for i in range(5):
         tfrecords_filename = os.path.join(
-            DATASET_DIR,
+            dataset_dir,
             'plants_validation_{:05d}-of-00005.tfrecord'.format(i))
         examples.extend(inspect_tfrecords(tfrecords_filename))
     print(len(examples))
     examples = []
     for i in range(5):
         tfrecords_filename = os.path.join(
-            DATASET_DIR,
+            dataset_dir,
             'plants_train_{:05d}-of-00005.tfrecord'.format(i))
         examples.extend(inspect_tfrecords(tfrecords_filename))
     print(len(examples))
@@ -725,14 +745,21 @@ def pre_process_mobilenet(im, coreml=False):
     return arr
 
 
-def pre_process(im, coreml=False):
+def pre_process(config, im, coreml=False):
+    model_name = get_model_name(config)
+
     return {
         'resnet_v2_50': pre_process_resnet,
         'mobilenet_v1': pre_process_mobilenet,
     }[model_name](im, coreml=coreml)
 
 
-def _inference_by_pb():
+def get_model_name(config):
+    model_name = get_config_value(config, 'model_name')
+    return model_name
+
+
+def test_inference_by_pb(config, pb_file_path=None, dataset_dir=None):
     # http://www.cnblogs.com/arkenstone/p/7551270.html
     filenames = [
         ('20180330/1lZsRrQzj/1lZsRrQzj_5.jpg', u'通泉草'),
@@ -740,9 +767,11 @@ def _inference_by_pb():
         # ('20180330/4PdXwYcGt/4PdXwYcGt_5.jpg', u'酢漿草'),
     ]
     for filename, label in filenames:
-        filename = dataset_dir_file(filename)
+        filename = dataset_dir_file(config, filename)
         # image_np = cv2.imread(filename)
-        result = run_inference_on_file(filename)
+        result = run_inference_on_file_pb(
+            config, filename, pb_file_path=pb_file_path,
+            dataset_dir=dataset_dir)
         index = result['prediction_label']
         print("Prediction label index:", index)
         prediction_name = result['prediction_name']
@@ -751,24 +780,27 @@ def _inference_by_pb():
         assert prediction_name == label
 
 
-def dataset_dir_file(filename):
-    filename = os.path.join(DATASET_DIR, filename)
+def dataset_dir_file(config, filename):
+    filename = os.path.join(get_dataset_dir(config), filename)
     return filename
 
 
-def run_inference_by_pb(image_np, pb_file_path=None):
-    pb_file_path = pb_file_path or '%s/frozen_graph.pb' % MODEL_DIR
+def run_inference_by_pb(config, image_np, pb_file_path=None):
+    checkpoint_dir_path = get_checkpoint_dir_path(config)
+    pb_file_path = pb_file_path or '%s/frozen_graph.pb' % checkpoint_dir_path
 
     with tf.gfile.GFile(pb_file_path) as f:
         graph_def = tf.GraphDef()
         graph_def.ParseFromString(f.read())
 
-        return _run_inference_by_graph_def(graph_def, image_np)
+        return _run_inference_by_graph_def(config, graph_def, image_np)
 
 
-def _run_inference_by_graph_def(graph_def, image_np):
+def _run_inference_by_graph_def(config, graph_def, image_np,
+                                enable_saliency_maps=False):
+    model_name = get_model_name(config)
     image_size = 224
-    image_np = pre_process(image_np)
+    image_np = pre_process(config, image_np)
     image_np = cv2.resize(image_np, (image_size, image_size))
     # expand dims to shape [None, 299, 299, 3]
     image_np = np.expand_dims(image_np, 0)
@@ -783,28 +815,35 @@ def _run_inference_by_graph_def(graph_def, image_np):
             input_tensor_name)  # get input tensor
         output_tensor = sess.graph.get_tensor_by_name(
             output_tensor_name)  # get output tensor
-        grad_imgs_tensor = sess.graph.get_tensor_by_name(
-            'gradients/MobilenetV1/MobilenetV1/Conv2d_0/Conv2D_grad/Conv2DBackpropInput:0')
-        logits, grad_imgs = sess.run([output_tensor, grad_imgs_tensor],
-                                     feed_dict={input_tensor: image_np})
+        tensor_map = {
+            'logits': output_tensor,
+        }
+
+        if enable_saliency_maps:
+            tensor_map['grad_imgs'] = sess.graph.get_tensor_by_name(
+                'gradients/MobilenetV1/MobilenetV1/Conv2d_0/Conv2D_grad/Conv2DBackpropInput:0')
+
+        result = sess.run(tensor_map, feed_dict={input_tensor: image_np})
 
         return {
-            'logits': logits,
-            'grad_imgs': grad_imgs,
+            'logits': result['logits'],
+            'grad_imgs': result.get('grad_imgs'),
         }
 
 
-def _inference_by_coreml():
-    labels_to_names = read_label_file(FLAGS.dataset_dir)
+def test_inference_by_coreml(config, coreml_file_path=None, dataset_dir=None):
+    labels_to_names = read_label_file(get_dataset_dir(config))
+    dataset_dir = get_dataset_dir(config)
     filenames = [
         ('20180330/1lZsRrQzj/1lZsRrQzj_5.jpg', u'通泉草'),
         ('20180330/iUTbDxEoT/iUTbDxEoT_0.jpg', u'杜鵑花仙子'),
         # ('20180330/4PdXwYcGt/4PdXwYcGt_5.jpg', u'酢漿草'),
     ]
     for filename, label in filenames:
-        filename = os.path.join(DATASET_DIR, filename)
+        filename = os.path.join(dataset_dir, filename)
         image_np = PIL.Image.open(filename)
-        logits = run_inference_by_coreml(image_np)
+        logits = run_inference_by_coreml(
+            config, image_np, coreml_file_path=coreml_file_path, )
 
         print('logits', logits)
         index = np.argmax(logits)
@@ -818,10 +857,14 @@ def _inference_by_coreml():
         assert prediction_name == label
 
 
-def run_inference_by_coreml(image_np):
-    frozen_model_file = '%s/frozen_graph.pb' % MODEL_DIR
-    coreml_model_file = '%s/plant.mlmodel' % MODEL_DIR
-    image_np = pre_process(image_np, coreml=True)
+def run_inference_by_coreml(config, image_np, coreml_file_path=None):
+    import coremltools
+    import tfcoreml
+    model_name = get_model_name(config)
+    checkpoint_dir_path = get_checkpoint_dir_path(config)
+    frozen_model_file = '%s/frozen_graph.pb' % checkpoint_dir_path
+    coreml_model_file = coreml_file_path or '%s/plant.mlmodel' % checkpoint_dir_path
+    image_np = pre_process(config, image_np, coreml=True)
 
     image = Image.fromarray(image_np.astype('int8'), 'RGB')
     input_tensor_shapes = {
@@ -866,10 +909,12 @@ def run_inference_by_coreml(image_np):
     return probs
 
 
-def run_inference_on_file_pb(filename):
-    labels_to_names = read_label_file(FLAGS.dataset_dir)
+def run_inference_on_file_pb(config, filename, pb_file_path=None,
+                             dataset_dir=None):
+    labels_to_names = read_label_file(get_dataset_dir(config))
     image_np = PIL.Image.open(filename)
-    logits = run_inference_by_pb(image_np)
+    logits = run_inference_by_pb(config, image_np, pb_file_path=pb_file_path)[
+        'logits']
     index = np.argmax(logits, 1)
     prediction_name = labels_to_names[index[0]]
     index_list = np.argsort(logits, 1)
@@ -885,8 +930,14 @@ def run_inference_on_file_pb(filename):
     return result
 
 
-def run_inference_on_file(filename):
-    return run_inference_on_file_pb(filename)
+def test_inference_by_model_files(config, dataset_dir=None,
+                                  frozen_graph_path=None,
+                                  coreml_file_path=None):
+    dataset_dir = dataset_dir or get_dataset_dir(config)
+    test_inference_by_pb(config, pb_file_path=frozen_graph_path,
+                         dataset_dir=dataset_dir)
+    test_inference_by_coreml(config, coreml_file_path=coreml_file_path,
+                             dataset_dir=dataset_dir)
 
 
 def get_image_with_saliency_map(image_np, saliency):
@@ -922,13 +973,15 @@ def get_image_with_saliency_map(image_np, saliency):
 
 def test_frozen_graph_saliency_map(config):
     checkpoint_dir = config['checkpoint_path']
+    dataset_dir = get_dataset_dir(config)
     frozen_graph_path = os.path.join(checkpoint_dir, 'frozen_graph.pb')
 
     filename = dataset_dir_file('20180330/1lZsRrQzj/1lZsRrQzj_5.jpg')
 
-    labels_to_names = read_label_file(DATASET_DIR)
+    labels_to_names = read_label_file(dataset_dir)
     image_np = PIL.Image.open(filename)
-    results = run_inference_by_pb(image_np, pb_file_path=frozen_graph_path)
+    results = run_inference_by_pb(config, image_np,
+                                  pb_file_path=frozen_graph_path)
     logits = results['logits']
 
     index = np.argmax(logits, 1)[0]
@@ -945,12 +998,70 @@ def test_frozen_graph_saliency_map(config):
     ], 2)
 
 
-def main(_):
-    # _inference_by_pb()
-    # _inference_by_coreml()
-    use_cached = True
-    _run_info(use_cached=use_cached)
+@click.group()
+def cli():
+    pass
+
+
+@cli.command()
+@click.argument('config_file')
+@click.option('--use_cached', is_flag=True)
+def run_info(config_file, use_cached):
+    with open(config_file) as f:
+        config = yaml.load(f)
+
+    _run_info(config, use_cached=use_cached)
+
+
+@cli.command()
+@click.argument('config_file')
+def test_models(config_file):
+    with open(config_file) as f:
+        config = yaml.load(f)
+
+    test_inference_by_model_files(config)
+
+
+@cli.command()
+@click.argument('config_file')
+@click.option('--use_cached', is_flag=True)
+def plot_roc(config_file, use_cached):
+    with open(config_file) as f:
+        config = yaml.load(f)
+
+    _roc_analysis(config, use_cached=use_cached)
+
+
+@cli.command()
+@click.argument('config_file')
+@click.option('--use_cached', is_flag=True)
+def saliency_maps(config_file, use_cached):
+    with open(config_file) as f:
+        config = yaml.load(f)
+
+    _run_saliency_maps(config, use_cached=use_cached)
+
+
+@cli.command()
+@click.argument('config_file')
+@click.option('--use_cached', is_flag=True)
+def confusion_matrix(config_file, use_cached):
+    with open(config_file) as f:
+        config = yaml.load(f)
+
+    keys = [
+        'confusion_matrix',
+    ]
+    aggregated = _eval_tensors(config, keys=keys, use_cached=use_cached)
+
+    checkpoint_dir_path = get_checkpoint_dir_path(config)
+    dataset_dir = get_dataset_dir(config)
+    labels_to_names = read_label_file(dataset_dir)
+    plot_confusion_matrix(aggregated['confusion_matrix'],
+                          labels_to_names=labels_to_names,
+                          save_dir=checkpoint_dir_path)
 
 
 if __name__ == '__main__':
-    tf.app.run()
+    define_tf_flags()
+    cli()
