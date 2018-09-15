@@ -27,7 +27,7 @@ VALIDATION_SET_NAME = 'validation'
 
 OUTPUT_MODEL_NODE_NAMES_DICT = {
     'resnet_v2_50': 'resnet_v2_50/predictions/Reshape_1',
-    'mobilenet_v1': 'MobilenetV1/Predictions/Reshape_1,gradients/MobilenetV1/MobilenetV1/Conv2d_0/Conv2D_grad/Conv2DBackpropInput',
+    'mobilenet_v1': 'MobilenetV1/Predictions/Reshape_1',
 }
 
 
@@ -321,7 +321,7 @@ def get_accuracy_log_path(config):
     return join(checkpoint_path, 'accuracy.log')
 
 
-def export_graph(config):
+def export_graph(config, enable_saliency_maps=False):
     checkpoint_dir = config['checkpoint_path']
     checkpoint_path = tf.train.latest_checkpoint(checkpoint_dir)
     dataset_dir = config['dataset_dir']
@@ -331,7 +331,8 @@ def export_graph(config):
     inference_graph_path = os.path.join(checkpoint_dir, 'inference_graph.pb')
     frozen_graph_path = os.path.join(checkpoint_dir, 'frozen_graph.pb')
 
-    export_inference_graph(model_name, dataset_dir, inference_graph_path)
+    export_inference_graph(model_name, dataset_dir, inference_graph_path,
+                           enable_saliency_maps=enable_saliency_maps)
 
     run_command([
         sys.executable, freeze_graph_script_path
@@ -339,14 +340,23 @@ def export_graph(config):
         'input_graph': inference_graph_path,
         'output_graph': frozen_graph_path,
         'input_checkpoint': checkpoint_path,
-        'output_node_names': OUTPUT_MODEL_NODE_NAMES_DICT[model_name],
+        'output_node_names': get_node_names(
+            model_name, enable_saliency_maps=enable_saliency_maps),
         'input_binary': 'true',
     })
 
     return frozen_graph_path
 
 
-def export_inference_graph(model_name, dataset_dir, output_file):
+def get_node_names(model_name, enable_saliency_maps=False):
+    node_names = OUTPUT_MODEL_NODE_NAMES_DICT[model_name]
+    if enable_saliency_maps:
+        node_names += ',gradients/MobilenetV1/MobilenetV1/Conv2d_0/Conv2D_grad/Conv2DBackpropInput'
+    return node_names
+
+
+def export_inference_graph(model_name, dataset_dir, output_file,
+                           enable_saliency_maps=False):
     # adapted from research/slim/export_inference_graph.py
     dataset_name = 'plants'
     labels_offset = 0
@@ -371,22 +381,24 @@ def export_inference_graph(model_name, dataset_dir, output_file):
                                      shape=[batch_size, image_size,
                                             image_size, 3])
         logits, _ = network_fn(placeholder)
-        predictions = tf.argmax(logits, 1)
 
-        one_hot_predictions = slim.one_hot_encoding(
-            predictions, dataset.num_classes - labels_offset)
+        if enable_saliency_maps:
+            predictions = tf.argmax(logits, 1)
 
-        softmax_cross_entropy_loss = slim.losses.softmax_cross_entropy(
-            logits, one_hot_predictions, label_smoothing=0.0, weights=1.0)
-        grad_imgs = tf.gradients(softmax_cross_entropy_loss,
-                                 placeholder)[0]
+            one_hot_predictions = slim.one_hot_encoding(
+                predictions, dataset.num_classes - labels_offset)
+
+            softmax_cross_entropy_loss = tf.losses.softmax_cross_entropy(
+                one_hot_predictions, logits, label_smoothing=0.0, weights=1.0)
+            grad_imgs = tf.gradients(softmax_cross_entropy_loss,
+                                     placeholder)[0]
 
         graph_def = graph.as_graph_def()
         with gfile.GFile(output_file, 'wb') as f:
             f.write(graph_def.SerializeToString())
 
 
-def export_coreml(config, frozen_graph_path):
+def export_coreml(config, frozen_graph_path, enable_saliency_maps=False):
     checkpoint_dir = config['checkpoint_path']
     model_name = config['model_name']
 
@@ -408,7 +420,8 @@ def export_coreml(config, frozen_graph_path):
         tf_model_path=frozen_graph_path,
         mlmodel_path=output_mlmodel_path,
         output_feature_names=[
-            '{}:0'.format(OUTPUT_MODEL_NODE_NAMES_DICT[model_name])
+            '{}:0'.format(get_node_names(
+                model_name, enable_saliency_maps=enable_saliency_maps))
         ],
         image_input_names=['input:0'],
         input_name_shape_dict={'input:0': [1, 224, 224, 3]},
@@ -416,7 +429,8 @@ def export_coreml(config, frozen_graph_path):
     )
 
 
-def export_tflite(config, frozen_graph_path):
+def export_tflite(config, frozen_graph_path,
+                  enable_saliency_maps=False):
     checkpoint_dir = config['checkpoint_path']
     checkpoint_path = tf.train.latest_checkpoint(checkpoint_dir)
     dataset_dir = config['dataset_dir']
@@ -434,7 +448,8 @@ def export_tflite(config, frozen_graph_path):
         'inference_type': 'FLOAT',
         'input_type': 'FLOAT',
         'input_arrays': 'input',
-        'output_arrays': OUTPUT_MODEL_NODE_NAMES_DICT[model_name],
+        'output_arrays': get_node_names(
+            model_name, enable_saliency_maps=enable_saliency_maps),
         'input_shapes': '1,224,224,3'
     }
     run_command([
@@ -500,7 +515,9 @@ def do_plot(config, save=True, show=False):
 @click.option('--export-models', is_flag=True)
 @click.option('--show-plot', is_flag=True)
 @click.option('--export-plot', is_flag=True)
-def main(config_file, export_models, show_plot, export_plot):
+@click.option('--enable-saliency-maps', is_flag=True)
+def main(config_file, export_models, show_plot, export_plot,
+         enable_saliency_maps):
     with open(config_file) as f:
         config = yaml.load(f)
 
@@ -513,11 +530,15 @@ def main(config_file, export_models, show_plot, export_plot):
     elif not export_models:
         run_train_eval_loop(config)
     else:
-        frozen_graph_path = export_graph(config)
-        export_coreml(config, frozen_graph_path)
-        export_tflite(config, frozen_graph_path)
-        from eval_lib import test_frozen_graph_saliency_map
-        test_frozen_graph_saliency_map(config)
+        frozen_graph_path = export_graph(
+            config, enable_saliency_maps=enable_saliency_maps)
+        export_coreml(config, frozen_graph_path,
+                      enable_saliency_maps=enable_saliency_maps)
+        export_tflite(config, frozen_graph_path,
+                      enable_saliency_maps=enable_saliency_maps)
+        if enable_saliency_maps:
+            from eval_lib import test_frozen_graph_saliency_map
+            test_frozen_graph_saliency_map(config)
 
 
 if __name__ == '__main__':
