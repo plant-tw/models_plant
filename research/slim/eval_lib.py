@@ -19,7 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from collections import Iterable
+from collections import Iterable, defaultdict
 
 import h5py
 from itertools import groupby, cycle
@@ -483,8 +483,8 @@ def _run_info(use_cached=False):
 
     grad_imgs = aggregated['grad_imgs']
     images = aggregated['images']
-    prefix = '{:03d}_'.format(0)
-    save_saliency_maps(grad_imgs, images, prefix)
+    prefix = ''
+    save_saliency_maps(grad_imgs, images, prefix, labels=aggregated['labels'])
 
     from collections import Counter
     all_labels = aggregated['labels']
@@ -519,9 +519,12 @@ def chunks(l, n):
     return [l[i:i + n] for i in range(0, len(l), n)]
 
 
-def save_saliency_maps(grad_imgs, images, prefix=''):
+def save_saliency_maps(grad_imgs, images, prefix='', labels=None):
     n = images.shape[0]
     save_dir = 'saliency_maps'
+    labels_to_names = read_label_file(FLAGS.dataset_dir)
+
+    label_count_map = defaultdict(int)
     try:
         os.makedirs(save_dir)
     except OSError:
@@ -529,11 +532,28 @@ def save_saliency_maps(grad_imgs, images, prefix=''):
     for j in range(n):
         image = images[j]
         grad_img = grad_imgs[j]
-        file_name = '{}/{}{:03d}.jpg'.format(save_dir, prefix, j)
+        label = labels[j]
+        label_name = labels_to_names[label]
+
+        if label_count_map[label] >= 10:
+            continue
+
+        file_name = '{}/{}{:03d}.jpg'.format(
+            save_dir,
+            '{:02}_{}_{}'.format(
+                label, label_name.encode('utf-8'),
+                prefix) if labels is not None else prefix,
+            label_count_map[label])
         saliency = deprocess_image(grad_img, target_std=0.3)
+        restored_image = ((image / 2 + 0.5) * 255).astype('uint8')
+        blend = get_image_with_saliency_map(restored_image, saliency)
         plot_image_in_grids([
-            saliency, image
+            saliency,
+            restored_image,
+            blend,
         ], n_columns=2, file_name=file_name)
+
+        label_count_map[label] += 1
 
 
 def _plot_roc(logits_list, labels, predictions, probabilities,
@@ -885,11 +905,17 @@ def get_image_with_saliency_map(image_np, saliency):
     intensify_factor = 3
     alpha = np.clip(1 - intensify_factor * saliency.astype(float) / 255, 0, 1)
 
-    paint = np.copy(1 - alpha)
-    paint[:, :] *= np.array([255, 200, 0]).astype(float) / 255  # orange
+    paint = np.copy(1 - alpha) * 255
+    overlap = roi_img[paint > 128]
+    if overlap.mean() + overlap.std() > 128:
+        color = np.array([0, 0, 255]).astype(float) / 255  # blue
+    else:
+        color = np.array([255, 200, 0]).astype(float) / 255  # orange
+
+    paint[:, :] *= color
 
     roi_img = cv2.multiply(alpha, roi_img.astype(float))
-    roi_img = cv2.add(paint * (1 - alpha) * 255, roi_img).astype(int)
+    roi_img = cv2.add(paint * (1 - alpha), roi_img).astype(int)
     canvas[w_offset:w_offset + l, h_offset:h_offset + l] = roi_img
     return canvas
 
